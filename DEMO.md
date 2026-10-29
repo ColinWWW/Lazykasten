@@ -35,17 +35,21 @@ exits quietly (single instance).
    in the footer list to insert `[[<id>|<title>]]`, save, then open the
    target note: its footer shows "1 backlinks" — click it to list the
    linking notes.
-8. **Numbers (10s).** Run in a terminal:
+8. **Theme flip (10s).** Press **Ctrl+Shift+P** and arrow through five
+   themes, each previews live in one frame. Press Enter to keep one
+   (it survives restarts), or Esc to revert.
+9. **Numbers (10s).** Run in a terminal:
    - `lazykasten.exe --eval-tags` — leave-one-out accuracy: on the demo
      vault, precision 1.000, recall 1.000, 0.82 ms per note. Thresholds:
      apply at confidence ≥ 0.4, suggest at ≥ 0.1, +0.5 when a tag's name
      appears in the note. Precision first: a wrong tag annoys more than a
      missing one.
    - `cargo test --release -- --ignored --nocapture` — 20,000-note
-     benchmark: first index 1.6s (target ≤ 3s), auto-tag suggest 8.4 ms
-     (target ≤ 20 ms), tag index (all 20k) ~12 ms, search ~13 ms.
-     Baseline before this work: index 1.5s, tag-all 11.7 ms, search
-     13.8 ms — nothing got slower.
+     benchmark, before -> after the performance pass: first index
+     1.54s -> 0.85s, no-change re-check 0.385s -> 0.025s, tag index
+     (400 notes) 1.36ms -> 0.53ms, auto-tag 8.8 -> 6.7 ms/note, search
+     ~15 ms but now in the background. Theme switch ~0.1ms. Full table
+     in PERF.md.
 
 ## Fallbacks
 

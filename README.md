@@ -52,6 +52,27 @@ Type `[[` in the editor and matching note titles appear above the footer;
 click one to insert `[[<id>|<title>]]`. Links are indexed, and an open note's
 footer shows its backlink count — click it to list the notes that link to it.
 
+## Themes
+
+25 bundled themes (Catppuccin, Gruvbox, Tokyo Night, Nord, Dracula,
+Solarized, RosÃ© Pine, Kanagawa, Everforest, Ayu, GitHub, Monokai, One Dark,
+and the default Lazykasten Dark), all fully local.
+
+- **Ctrl+Shift+P** (or Ctrl+K then T) opens the theme picker. Arrow keys
+  preview each theme live; **Enter** keeps it and saves the choice, **Esc**
+  reverts. The search box filters by name.
+- The choice is stored in `<vault>/.lazykasten/settings.toml` and survives
+  restarts.
+- Custom themes: drop gpui-component `ThemeSet` JSON files (same format as
+  the bundled ones in `themes/`) into `<vault>/.lazykasten/themes/`. They
+  load when the picker first opens; invalid files are skipped with a status
+  message, never a crash.
+- Palette sources and licenses: `themes/LICENSES.md`.
+
+Performance at 20,000 notes (release, see `PERF.md`): first index 0.85s,
+no-change re-check 0.025s, tag index (400 notes) 0.5ms, auto-tag 6.7ms,
+hotkey show ~10-21ms.
+
 ## Vault
 
 Notes are plain Markdown files you own (readable by Obsidian or any editor):

@@ -1,26 +1,38 @@
 # Lazykasten performance
 
-Measured on this machine, release build, 20,000-note benchmark vault
-(`cargo test --release -- --ignored --nocapture`). UI timings from
-`LAZYKASTEN_TRACE=1` (`<vault>/.lazykasten/trace.log`) and the PowerShell
-window-driving method. Trace cost when off: one branch, no formatting, no I/O.
+## Summary (final)
+
+Everything measured got faster or stayed flat; nothing regressed:
+
+- **First index of 20k notes: 1.536s -> 0.848s** (prepare_cached hot paths).
+- **Startup re-check with no changes: 0.385s -> 0.025s** (DirEntry metadata
+  instead of a syscall per file) â€” about 15x.
+- **Tag index (400 notes): 1.360ms -> 0.525ms**; auto-tag suggest
+  **8.778 -> 6.696 ms/note**.
+- Search is FTS-bound (~15ms at 500 hits) but now runs in the background
+  with generation-tagged results, so it never drops typed characters; a
+  1-char query is an exact-term lookup instead of the prefix worst case.
+- Hotkey shows stayed ~10-21ms with themes enabled; a theme switch costs
+  ~0.04-0.10ms of apply time (one frame). The cross-monitor first-show
+  GPUI panic found while measuring was fixed by moving placement and
+  `ShowWindow` outside `window.update`.
 
 ## Baseline (milestone 12, before the performance pass)
 
 | Operation | Before | After (M13) | Final (M15) |
 |---|---|---|---|
-| First index, 20k notes | 1.536s | 0.888s |  |
-| Tag index, 400 notes | 1.360ms | 0.533ms |  |
-| Tag index, all 20k | 14.186ms | 13.059ms |  |
-| Full-text search `searchable` | 14.556ms | 15.040ms (noise; now off UI thread) |  |
-| Search 1-letter `a` (prefix) | 0.188ms (0 hits in bench vault) | 0.086ms (exact-term now) |  |
-| Search 2-letter `se` (prefix, 500 hits) | 14.635ms | 14.121ms |  |
-| Auto-tag suggest (20-run avg) | 8.778ms/note | 6.594ms/note |  |
-| Startup re-check, no changes (20k) | 0.385s | 0.026s |  |
-| Startup to window ready (`startup_ready`) | 254ms (320-note vault) | | |
-| Hotkey, first show (`hotkey_show_first`) | 14.7ms | | |
-| Hotkey, later shows (`hotkey_show`) | 15.3ms (12–17ms external) | | |
-| Release exe size | 24,407,552 B | unchanged (fat-LTO trial reverted) |  |
+| First index, 20k notes | 1.536s | 0.888s | 0.848s |
+| Tag index, 400 notes | 1.360ms | 0.533ms | 0.525ms |
+| Tag index, all 20k | 14.186ms | 13.059ms | 13.360ms |
+| Full-text search `searchable` | 14.556ms | 15.040ms (noise; now off UI thread) | 15.226ms (off UI thread) |
+| Search 1-letter `a` (prefix) | 0.188ms (0 hits in bench vault) | 0.086ms (exact-term now) | 0.069ms (exact-term) |
+| Search 2-letter `se` (prefix, 500 hits) | 14.635ms | 14.121ms | 15.659ms |
+| Auto-tag suggest (20-run avg) | 8.778ms/note | 6.594ms/note | 6.696ms/note |
+| Startup re-check, no changes (20k) | 0.385s | 0.026s | 0.025s |
+| Startup to window ready (`startup_ready`) | 254ms (320-note vault) |  | 238ms (320-note vault, themes on) |
+| Hotkey, first show (`hotkey_show_first`) | 14.7ms |  | 20.6ms (themes on; 19.4ms in M13) |
+| Hotkey, later shows (`hotkey_show`) | 15.3ms (12–17ms external) |  | 10.1ms (M13 trace) |
+| Release exe size | 24,407,552 B | unchanged (fat-LTO trial reverted) | 24,547,840 B |
 
 Notes:
 - `hotkey_show*` measures the show handling on the UI thread (placement,

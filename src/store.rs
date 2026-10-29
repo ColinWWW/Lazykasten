@@ -242,6 +242,13 @@ impl Store {
 
     /// Save a note. Empty text deletes the file and its index rows.
     pub fn save(&self, id: &str, text: &str) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let r = self.save_impl(id, text);
+        crate::trace::log("save", t0.elapsed());
+        r
+    }
+
+    fn save_impl(&self, id: &str, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             let path = self.note_path(id);
             if path.exists() {
@@ -325,6 +332,13 @@ impl Store {
 
     /// Make the index match the files. Returns how many notes were re-indexed.
     pub fn sync_with_disk(&self) -> Result<usize> {
+        let t0 = std::time::Instant::now();
+        let r = self.sync_with_disk_impl();
+        crate::trace::log("sync_with_disk", t0.elapsed());
+        r
+    }
+
+    fn sync_with_disk_impl(&self) -> Result<usize> {
         // 1. List *.md files with mtimes.
         let mut files: Vec<(String, PathBuf, i64)> = Vec::new();
         if self.notes_dir.is_dir() {
@@ -417,6 +431,13 @@ impl Store {
     }
 
     pub fn notes_with_tag(&self, tag: &str) -> Result<Vec<NoteSummary>> {
+        let t0 = std::time::Instant::now();
+        let r = self.notes_with_tag_impl(tag);
+        crate::trace::log("notes_with_tag", t0.elapsed());
+        r
+    }
+
+    fn notes_with_tag_impl(&self, tag: &str) -> Result<Vec<NoteSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT n.id, n.title FROM notes n
@@ -470,6 +491,13 @@ impl Store {
     }
 
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<NoteSummary>> {
+        let t0 = std::time::Instant::now();
+        let r = self.search_impl(query, limit);
+        crate::trace::log("search", t0.elapsed());
+        r
+    }
+
+    fn search_impl(&self, query: &str, limit: i64) -> Result<Vec<NoteSummary>> {
         let words: Vec<&str> = query.split_whitespace().collect();
         if words.is_empty() {
             return Ok(Vec::new());
@@ -693,6 +721,20 @@ mod tests {
         let search_ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(!hits.is_empty());
 
+        // Worst cases: short prefix searches, plus the no-change re-check.
+        let t0 = Instant::now();
+        let hits1 = store.search("a", 500).unwrap();
+        let search1_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _ = &hits1;
+        let t0 = Instant::now();
+        let hits2 = store.search("se", 500).unwrap();
+        let search2_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _ = &hits2;
+        let t0 = Instant::now();
+        let rechecked = store.sync_with_disk().unwrap();
+        let recheck_secs = t0.elapsed().as_secs_f64();
+        assert_eq!(rechecked, 0);
+
         let t0 = Instant::now();
         let mut last = Vec::new();
         for _ in 0..20 {
@@ -710,6 +752,9 @@ mod tests {
         println!("tag index (400 notes): {tag_ms:.3}ms");
         println!("tag index (all notes): {all_ms:.3}ms");
         println!("full-text search: {search_ms:.3}ms");
+        println!("search 1-letter (a): {search1_ms:.3}ms ({} hits)", hits1.len());
+        println!("search 2-letter (se): {search2_ms:.3}ms ({} hits)", hits2.len());
+        println!("startup re-check (no changes): {recheck_secs:.3}s");
         println!("auto-tag suggest: {autotag_ms:.3}ms per note");
 
         drop(store);

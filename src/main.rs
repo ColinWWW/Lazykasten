@@ -6,6 +6,7 @@
 
 mod autotag;
 mod store;
+mod trace;
 mod ui;
 
 use std::cell::Cell;
@@ -117,6 +118,7 @@ fn tray_rgba() -> Vec<u8> {
 }
 
 fn main() {
+    let app_started = std::time::Instant::now();
     // Single instance: a second launch exits quietly instead of failing on
     // the Alt+J hotkey registration. The mutex handle stays open for the
     // whole run because `application().run` blocks until quit.
@@ -138,6 +140,7 @@ fn main() {
     };
 
     let root = store::default_root();
+    trace::init(&root);
     let store = match Store::open(&root) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -283,6 +286,7 @@ fn main() {
                 return;
             }
         };
+        trace::log("startup_ready", app_started.elapsed());
 
         if !start_hidden {
             let _ = tx.try_send(Command::Show);
@@ -304,22 +308,28 @@ fn main() {
                                     view.update(cx, |v, cx| v.commit(window, cx));
                                     let _ = ShowWindow(hwnd, SW_HIDE);
                                 } else {
-                                    if !placed.get() {
+                                    let t0 = std::time::Instant::now();
+                                    let first = !placed.get();
+                                    if first {
                                         place_on_cursor_monitor(hwnd);
                                         placed.set(true);
                                     }
                                     show_and_focus(hwnd);
                                     view.update(cx, |v, cx| v.on_show(window, cx));
+                                    trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
                                 }
                             }
                             Command::Show => {
                                 if !IsWindowVisible(hwnd).as_bool() {
-                                    if !placed.get() {
+                                    let t0 = std::time::Instant::now();
+                                    let first = !placed.get();
+                                    if first {
                                         place_on_cursor_monitor(hwnd);
                                         placed.set(true);
                                     }
                                     show_and_focus(hwnd);
                                     view.update(cx, |v, cx| v.on_show(window, cx));
+                                    trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
                                 }
                             }
                             Command::Quit => {

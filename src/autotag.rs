@@ -205,6 +205,13 @@ fn neighbors(
 /// Suggest tags for `text`, excluding note `exclude_id` from its own
 /// neighbor set. Sorted by confidence descending.
 pub fn suggest_tags(store: &Store, exclude_id: &str, text: &str) -> Result<Vec<Suggestion>> {
+    let t0 = std::time::Instant::now();
+    let r = suggest_tags_impl(store, exclude_id, text);
+    crate::trace::log("autotag_suggest", t0.elapsed());
+    r
+}
+
+fn suggest_tags_impl(store: &Store, exclude_id: &str, text: &str) -> Result<Vec<Suggestion>> {
     let tag_names = all_tag_names(store)?;
     // Canonical spelling lookup, keyed by lowercase name.
     let canonical: HashMap<String, String> = tag_names

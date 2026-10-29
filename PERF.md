@@ -6,7 +6,7 @@ Everything measured got faster or stayed flat; nothing regressed:
 
 - **First index of 20k notes: 1.536s -> 0.848s** (prepare_cached hot paths).
 - **Startup re-check with no changes: 0.385s -> 0.025s** (DirEntry metadata
-  instead of a syscall per file) â€” about 15x.
+  instead of a syscall per file) -€” about 15x.
 - **Tag index (400 notes): 1.360ms -> 0.525ms**; auto-tag suggest
   **8.778 -> 6.696 ms/note**.
 - Search is FTS-bound (~15ms at 500 hits) but now runs in the background

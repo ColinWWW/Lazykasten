@@ -117,6 +117,26 @@ fn tray_rgba() -> Vec<u8> {
 }
 
 fn main() {
+    // Single instance: a second launch exits quietly instead of failing on
+    // the Alt+J hotkey registration. The mutex handle stays open for the
+    // whole run because `application().run` blocks until quit.
+    let _instance_mutex = unsafe {
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::core::PCWSTR;
+        let name: Vec<u16> = "Local\\LazykastenSingleInstance\0".encode_utf16().collect();
+        match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
+            Ok(handle) => {
+                if GetLastError() == ERROR_ALREADY_EXISTS {
+                    eprintln!("lazykasten: already running");
+                    return;
+                }
+                Some(handle)
+            }
+            Err(_) => None,
+        }
+    };
+
     let root = store::default_root();
     let store = match Store::open(&root) {
         Ok(s) => Arc::new(s),

@@ -12,6 +12,8 @@ note is saved, tagged, and indexed.
 | Ctrl+S | Save the current note |
 | Ctrl+N | Save and start a new note |
 | Ctrl+O | Browse tags and notes (again to return to the editor) |
+| Ctrl+T | Suggest tags for the open note (click a chip to apply) |
+| Ctrl+Shift+T | Sweep the inbox with the auto-tagger (on the tag list) |
 | Esc | Go back one screen |
 | ↑ / ↓ | Move the selection in the browser (while the search box is focused) |
 | Enter | Open the selected tag or note |
@@ -20,6 +22,29 @@ Tag a note with a line like `Tag: Javascript, Computer Programming` or with
 inline `#hashtags`. Untagged notes go to the `inbox` tag. Clicking a tag or a
 footer chip opens that tag's index, newest first. The browser search box
 searches all note text with prefix matching as you type.
+
+## Auto-tagging
+
+Lazykasten can tag untagged notes for you, learning from the notes you have
+already tagged. It runs fully locally — no LLM, no network, nothing is sent
+anywhere. It scores a new note's key terms against the SQLite FTS5 index,
+finds similar tagged notes, and lets them vote for their tags; a tag whose
+name appears in the note gets a boost. The more you tag, the better it gets.
+
+- Hiding (Alt+J) an untagged note saves it to `inbox` instantly, then applies
+  tags in the background when confidence is at least 0.4 (at most 3). The
+  next time the window opens it shows `Auto-tagged: #A #B`.
+- **Ctrl+T** in the editor shows tag suggestions with their confidence as
+  outlined chips in the footer. Click one to add it to the note's `Tag:` line;
+  Esc dismisses them.
+- **Ctrl+Shift+T** on the tag list sweeps every `inbox` note through the
+  auto-tagger and reports how many it tagged.
+- Measure accuracy with `lazykasten.exe --eval-tags` (vault from
+  `%LAZYKASTEN_VAULT%`). It strips each tagged note's tags, re-runs the
+  tagger with the note excluded, and prints precision, recall, the share of
+  notes with at least one correct tag, and the time per note. Thresholds
+  chosen: apply at 0.4, suggest at 0.1, name boost +0.5 — precision matters
+  more than recall, since a wrong tag annoys more than a missing one.
 
 ## Vault
 

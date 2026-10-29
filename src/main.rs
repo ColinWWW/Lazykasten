@@ -4,6 +4,7 @@
 //! and Alt+J only shows/hides it with raw Win32 calls.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autotag;
 mod store;
 mod ui;
 
@@ -124,6 +125,25 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // `--eval-tags`: leave-one-out auto-tagging accuracy, no window.
+    if std::env::args().any(|a| a == "--eval-tags") {
+        let _ = store.sync_with_disk();
+        match autotag::eval_tags(&store) {
+            Ok(r) => {
+                println!("notes evaluated: {}", r.notes);
+                println!("precision: {:.3} ({} of {} applied tags correct)", r.precision, r.correct, r.applied);
+                println!("recall: {:.3} ({} of {} real tags found)", r.recall, r.correct, r.real_total);
+                println!("notes with >=1 correct tag: {:.3}", r.hit_rate);
+                println!("time per note: {:.2} ms", r.ms_per_note);
+                println!("thresholds: apply >= {}, suggest >= {}, name boost +{} (precision first: a wrong tag annoys more than a missing one)", autotag::AUTO_THRESHOLD, autotag::SUGGEST_THRESHOLD, autotag::NAME_BOOST);
+            }
+            Err(e) => {
+                eprintln!("lazykasten: --eval-tags failed: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let start_hidden = std::env::args().any(|a| a == "--hidden");
 
     gpui_kit::application().run(move |cx: &mut App| {

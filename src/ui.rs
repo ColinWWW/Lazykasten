@@ -6,9 +6,10 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::*;
 
+use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox]);
 
 /// Register keys. Must run after `gpui_kit::init` so the more specific
 /// `"TagSearch > Input"` context wins over the input's own `"Input"` bindings.
@@ -17,6 +18,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-s", SaveNote, Some("LazyKasten")),
         KeyBinding::new("ctrl-n", NewNote, Some("LazyKasten")),
         KeyBinding::new("ctrl-o", Browse, Some("LazyKasten")),
+        KeyBinding::new("ctrl-t", SuggestTags, Some("LazyKasten")),
+        KeyBinding::new("ctrl-shift-t", SweepInbox, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
         KeyBinding::new("up", SelectPrev, Some("TagSearch > Input")),
         KeyBinding::new("down", SelectNext, Some("TagSearch > Input")),
@@ -44,6 +47,8 @@ pub struct LazyKasten {
     selected: usize,
     list_scroll: UniformListScrollHandle,
     status: SharedString,
+    keep_status: bool,
+    suggestions: Vec<Suggestion>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -83,6 +88,8 @@ impl LazyKasten {
             selected: 0,
             list_scroll: UniformListScrollHandle::new(),
             status: SharedString::default(),
+            keep_status: false,
+            suggestions: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -113,20 +120,130 @@ impl LazyKasten {
     /// Called when the window is shown: fresh editor, cursor ready.
     pub fn on_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = Screen::Editor;
-        self.status = SharedString::default();
+        // A status set by background auto-tagging survives one show so the
+        // user sees what happened to the note they just hid.
+        if self.keep_status {
+            self.keep_status = false;
+        } else {
+            self.status = SharedString::default();
+        }
         self.editor.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
 
-    /// Save the current note and reset to a blank editor.
+    /// Save the current note and reset to a blank editor. The save itself
+    /// stays instant; auto-tagging of an untagged note runs afterwards in
+    /// the background and never delays the hide.
     pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text_before = self.editor.read(cx).value().to_string();
+        let untagged = parse_tags(&text_before).is_empty() && !text_before.trim().is_empty();
         self.save(window, cx);
+        let saved_id = self.note_id.clone();
         self.note_id = None;
         self.saved_text = SharedString::default();
         self.live_tags.clear();
+        self.suggestions.clear();
         self.editor
             .update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
+        if untagged {
+            if let Some(id) = saved_id {
+                self.spawn_auto_tag(id, text_before, cx);
+            }
+        }
+    }
+
+    /// Background auto-tag for one just-saved inbox note.
+    fn spawn_auto_tag(&mut self, id: String, original_text: String, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let bg_id = id.clone();
+        let bg_text = original_text.clone();
+        let task = cx.background_spawn(async move {
+            match crate::autotag::suggest_tags(&store, &bg_id, &bg_text) {
+                Ok(suggestions) => {
+                    let tags = crate::autotag::confident_tags(&suggestions);
+                    if tags.is_empty() {
+                        None
+                    } else {
+                        match crate::autotag::apply_tags_if_unchanged(&store, &bg_id, &bg_text, &tags) {
+                            Ok(true) => Some(format!(
+                                "Auto-tagged: {}",
+                                tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")
+                            )),
+                            Ok(false) => None,
+                            Err(e) => Some(format!("Auto-tagging failed: {e}")),
+                        }
+                    }
+                }
+                Err(e) => Some(format!("Auto-tagging failed: {e}")),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some(status) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = status.into();
+                    this.keep_status = true;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn on_suggest_tags(&mut self, _: &SuggestTags, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Editor {
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let exclude = self.note_id.clone().unwrap_or_default();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move {
+            crate::autotag::suggest_tags(&store, &exclude, &text)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| s.confidence >= crate::autotag::SUGGEST_THRESHOLD)
+                .take(5)
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let suggestions = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.suggestions = suggestions;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_sweep_inbox(&mut self, _: &SweepInbox, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Tags {
+            return;
+        }
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move {
+            let inbox = store.notes_with_tag("inbox").unwrap_or_default();
+            let total = inbox.len();
+            let mut tagged = 0usize;
+            for note in &inbox {
+                let Ok(text) = store.read(&note.id) else { continue };
+                let Ok(suggestions) = crate::autotag::suggest_tags(&store, &note.id, &text) else { continue };
+                let tags = crate::autotag::confident_tags(&suggestions);
+                if crate::autotag::apply_tags_if_unchanged(&store, &note.id, &text, &tags).unwrap_or(false) {
+                    tagged += 1;
+                }
+            }
+            (tagged, total)
+        });
+        cx.spawn(async move |this, cx| {
+            let (tagged, total) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = format!("Tagged {tagged} of {total} inbox notes").into();
+                this.keep_status = true;
+                this.tags = this.store.tags().unwrap_or_default();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -266,6 +383,12 @@ impl LazyKasten {
     }
 
     fn on_back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        // Esc first dismisses Ctrl+T suggestions in the editor.
+        if self.screen == Screen::Editor && !self.suggestions.is_empty() {
+            self.suggestions.clear();
+            cx.notify();
+            return;
+        }
         match self.screen {
             Screen::TagIndex(_) | Screen::Search => self.show_tags(window, cx),
             Screen::Tags => {
@@ -310,10 +433,37 @@ impl LazyKasten {
             );
         }
 
+        // Ctrl+T suggestions: outlined chips with confidence; click adds the
+        // tag to the note's Tag: line.
+        for (j, suggestion) in self.suggestions.clone().iter().enumerate() {
+            let tag_for_click = suggestion.tag.clone();
+            chip_row = chip_row.child(
+                div()
+                    .id(100 + j)
+                    .cursor_pointer()
+                    .text_color(theme.blue)
+                    .border_1()
+                    .border_color(theme.blue)
+                    .rounded_md()
+                    .px_2()
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(format!("#{} {}%", suggestion.tag, (suggestion.confidence * 100.0).round() as i64))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        let tag = tag_for_click.clone();
+                        let text = this.editor.read(cx).value().to_string();
+                        let new_text = crate::autotag::add_tag_to_text(&text, &tag);
+                        this.editor.update(cx, |s, cx| s.set_value(new_text.clone(), window, cx));
+                        this.live_tags = parse_tags(&new_text);
+                        this.suggestions.retain(|s| !s.tag.eq_ignore_ascii_case(&tag));
+                        cx.notify();
+                    })),
+            );
+        }
+
         let right: AnyElement = if status.is_empty() {
             div()
                 .text_color(theme.muted_foreground)
-                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+N new")
+                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags   Ctrl+N new")
                 .into_any_element()
         } else {
             div()
@@ -458,7 +608,11 @@ impl LazyKasten {
                     .border_color(theme.border)
                     .px_4()
                     .text_color(theme.muted_foreground)
-                    .child("↑↓ select   Enter open   Esc back   Alt+J hide"),
+                    .child(if self.screen == Screen::Tags {
+                        "↑↓ select   Enter open   Esc back   Ctrl+Shift+T sweep inbox   Alt+J hide"
+                    } else {
+                        "↑↓ select   Enter open   Esc back   Alt+J hide"
+                    }),
             )
     }
 }
@@ -491,6 +645,8 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_back))
             .on_action(cx.listener(Self::on_select_prev))
             .on_action(cx.listener(Self::on_select_next))
+            .on_action(cx.listener(Self::on_suggest_tags))
+            .on_action(cx.listener(Self::on_sweep_inbox))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

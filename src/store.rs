@@ -34,7 +34,7 @@ pub fn default_root() -> PathBuf {
     home.join("Lazykasten")
 }
 
-fn is_tag_line(line: &str) -> Option<&str> {
+pub(crate) fn is_tag_line(line: &str) -> Option<&str> {
     let (head, rest) = line.split_once(':')?;
     let head = head.trim().to_lowercase();
     if head == "tag" || head == "tags" {
@@ -150,7 +150,8 @@ impl Store {
         if version != SCHEMA_VERSION {
             let tx = conn.transaction()?;
             tx.execute_batch(
-                "DROP TABLE IF EXISTS notes_text;
+                "DROP TABLE IF EXISTS notes_vocab;
+                 DROP TABLE IF EXISTS notes_text;
                  DROP TABLE IF EXISTS note_tags;
                  DROP TABLE IF EXISTS tags;
                  DROP TABLE IF EXISTS notes;",
@@ -175,13 +176,20 @@ impl Store {
                PRIMARY KEY (tag_id, note_id)
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS note_tags_by_note ON note_tags(note_id);
-             CREATE VIRTUAL TABLE IF NOT EXISTS notes_text USING fts5(body);",
+             CREATE VIRTUAL TABLE IF NOT EXISTS notes_text USING fts5(body);
+             CREATE VIRTUAL TABLE IF NOT EXISTS notes_vocab USING fts5vocab(notes_text, 'row');",
         )?;
 
         Ok(Store {
             notes_dir,
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Lock the index connection. Crate-internal so `autotag` can run its
+    /// FTS/vocab queries against the same connection.
+    pub(crate) fn lock_conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+        self.conn.lock().expect("store lock poisoned")
     }
 
     pub fn note_path(&self, id: &str) -> PathBuf {
@@ -594,10 +602,24 @@ mod tests {
         let search_ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(!hits.is_empty());
 
+        let t0 = Instant::now();
+        let mut last = Vec::new();
+        for _ in 0..20 {
+            last = crate::autotag::suggest_tags(
+                &store,
+                "bench-new-note",
+                "A note about searchable words and body text for note tagging",
+            )
+            .unwrap();
+        }
+        let autotag_ms = t0.elapsed().as_secs_f64() * 1000.0 / 20.0;
+        let _ = last;
+
         println!("first index of {n} notes: {index_secs:.3}s");
         println!("tag index (400 notes): {tag_ms:.3}ms");
         println!("tag index (all notes): {all_ms:.3}ms");
         println!("full-text search: {search_ms:.3}ms");
+        println!("auto-tag suggest: {autotag_ms:.3}ms per note");
 
         drop(store);
         let _ = std::fs::remove_dir_all(&root);

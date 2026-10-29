@@ -768,22 +768,45 @@ impl LazyKasten {
             }
             Screen::Themes => {
                 let entry = &self.theme_entries[self.theme_filtered[ix]];
+                // Three clear columns (name / mode / swatches) with wide
+                // gaps; every swatch is bordered so light swatches stay
+                // visible on light themes and dark ones on dark themes.
                 let mut swatches = div().flex().items_center().gap_1();
                 for sw in entry.swatches {
-                    swatches = swatches.child(div().w_4().h_4().rounded_sm().bg(rgb(sw)));
+                    swatches = swatches.child(
+                        div()
+                            .w_4()
+                            .h_4()
+                            .rounded_sm()
+                            .bg(rgb(sw))
+                            .border_1()
+                            .border_color(theme.border),
+                    );
                 }
-                row.child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .child(entry.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(if entry.dark { "dark" } else { "light" }),
-                )
-                .child(swatches)
+                let display_name = if entry.name == self.theme_original {
+                    format!("\u{2713} {}", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                row.gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(display_name),
+                    )
+                    .child(
+                        div()
+                            .w_12()
+                            .mr_2()
+                            .flex()
+                            .justify_end()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(if entry.dark { "dark" } else { "light" }),
+                    )
+                    .child(swatches)
             }
             _ => {
                 let note = &self.notes[ix];

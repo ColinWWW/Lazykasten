@@ -95,7 +95,7 @@ cargo test --release -- --ignored --nocapture   # 20,000-note benchmark
 ```
 
 Kill any running `lazykasten.exe` before rebuilding; Windows locks the exe
-while it runs.
+while it runs. Faster edit-compile loop: `cargo run --release`.
 
 ## Run
 

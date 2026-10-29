@@ -38,6 +38,41 @@ enum Screen {
     Themes,
 }
 
+/// Schedule a `trace` entry for the next painted frame (no-op cost when
+/// tracing is off: the callback is never scheduled).
+fn trace_next_frame(window: &mut Window, op: &'static str) {
+    if crate::trace::enabled() {
+        let t0 = std::time::Instant::now();
+        window.on_next_frame(move |_, _| crate::trace::log(op, t0.elapsed()));
+    }
+}
+
+/// Every themed colour one row/render pass needs, copied out of the theme
+/// once per full render instead of cloning the whole Theme per widget.
+#[derive(Clone, Copy)]
+struct RowColors {
+    background: Hsla,
+    foreground: Hsla,
+    blue: Hsla,
+    muted_foreground: Hsla,
+    list_hover: Hsla,
+    list_active: Hsla,
+    border: Hsla,
+}
+
+fn row_colors(cx: &App) -> RowColors {
+    let t = cx.theme();
+    RowColors {
+        background: t.background,
+        foreground: t.foreground,
+        blue: t.blue,
+        muted_foreground: t.muted_foreground,
+        list_hover: t.list_hover,
+        list_active: t.list_active,
+        border: t.border,
+    }
+}
+
 pub struct LazyKasten {
     store: Arc<Store>,
     editor: Entity<TextareaState>,
@@ -62,6 +97,7 @@ pub struct LazyKasten {
     theme_filtered: Vec<usize>,
     theme_original: String,
     themes_loaded: bool,
+    screen_gen: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,13 +148,21 @@ impl LazyKasten {
             theme_filtered: Vec::new(),
             theme_original: String::new(),
             themes_loaded: false,
+            screen_gen: 0,
             _subscriptions: subscriptions,
         }
     }
 
-    fn on_editor_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_editor_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        trace_next_frame(window, "keystroke_to_frame");
         let text = self.editor.read(cx).value();
-        let tags = parse_tags(&text);
+        // Fast path: with no '#' or ':' anywhere and no tags yet, the note
+        // cannot gain tags; skip the full parse on every keystroke.
+        let tags = if self.live_tags.is_empty() && !text.contains('#') && !text.contains(':') {
+            Vec::new()
+        } else {
+            parse_tags(&text)
+        };
         if tags != self.live_tags {
             self.live_tags = tags;
             cx.notify();
@@ -178,8 +222,6 @@ impl LazyKasten {
         self.search_gen += 1;
         let seq = self.search_gen;
         if query.trim().is_empty() {
-            self.tags = self.store.tags().unwrap_or_default();
-            self.note_total = self.store.note_count().unwrap_or(0);
             self.screen = Screen::Tags;
             self.selected = 0;
             cx.notify();
@@ -190,7 +232,7 @@ impl LazyKasten {
         self.screen = Screen::Search;
         cx.notify();
         let store = self.store.clone();
-        let task = cx.background_spawn(async move { store.search(&query, 500).unwrap_or_default() });
+        let task = cx.background_spawn(async move { store.search(&query, 200).unwrap_or_default() });
         cx.spawn(async move |this, cx| {
             let notes = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -327,14 +369,15 @@ impl LazyKasten {
                     tagged += 1;
                 }
             }
-            (tagged, total)
+            let tags = store.tags().unwrap_or_default();
+            (tagged, total, tags)
         });
         cx.spawn(async move |this, cx| {
-            let (tagged, total) = task.await;
+            let (tagged, total, tags) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.status = format!("Tagged {tagged} of {total} inbox notes").into();
                 this.keep_status = true;
-                this.tags = this.store.tags().unwrap_or_default();
+                this.tags = tags;
                 cx.notify();
             });
         })
@@ -375,7 +418,25 @@ impl LazyKasten {
         match self.store.read(id) {
             Ok(text) => {
                 self.live_tags = parse_tags(&text);
-                self.backlink_count = self.store.backlinks(id).map(|b| b.len()).unwrap_or(0);
+                // Backlink count arrives in the background (one indexed
+                // COUNT query); the footer updates when it lands.
+                self.backlink_count = 0;
+                let store = self.store.clone();
+                let bg_id = id.to_string();
+                let check_id = bg_id.clone();
+                let task = cx.background_spawn(async move {
+                    store.backlink_count(&bg_id).unwrap_or(0)
+                });
+                cx.spawn(async move |this, cx| {
+                    let count = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.note_id.as_deref() == Some(check_id.as_str()) {
+                            this.backlink_count = count.max(0) as usize;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
                 self.link_matches.clear();
                 self.suggestions.clear();
                 self.saved_text = text.clone().into();
@@ -444,32 +505,77 @@ impl LazyKasten {
         cx.notify();
     }
 
+    /// Screen switches flip instantly and load their rows in the
+    /// background; the previous rows stay until the new ones land, and a
+    /// generation number drops stale arrivals.
     pub fn show_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tags = self.store.tags().unwrap_or_default();
-        self.note_total = self.store.note_count().unwrap_or(0);
+        self.screen_gen += 1;
+        let seq = self.screen_gen;
         self.screen = Screen::Tags;
         self.selected = 0;
         self.search
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.search.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move {
+            (store.tags().unwrap_or_default(), store.note_count().unwrap_or(0))
+        });
+        cx.spawn(async move |this, cx| {
+            let (tags, total) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.screen_gen == seq {
+                    this.tags = tags;
+                    this.note_total = total;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn show_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.notes = self.store.notes_with_tag(tag).unwrap_or_default();
+        self.screen_gen += 1;
+        let seq = self.screen_gen;
         self.screen = Screen::TagIndex(tag.to_string());
         self.selected = 0;
         self.search.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
+        let store = self.store.clone();
+        let tag = tag.to_string();
+        let task = cx.background_spawn(async move { store.notes_with_tag(&tag).unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let notes = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.screen_gen == seq {
+                    this.notes = notes;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn show_backlinks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.note_id.clone() else { return };
-        self.notes = self.store.backlinks(&id).unwrap_or_default();
-        self.screen = Screen::Backlinks(id);
+        self.screen_gen += 1;
+        let seq = self.screen_gen;
+        self.screen = Screen::Backlinks(id.clone());
         self.selected = 0;
         self.search.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { store.backlinks(&id).unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let notes = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.screen_gen == seq {
+                    this.notes = notes;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn list_len(&self) -> usize {
@@ -516,6 +622,7 @@ impl LazyKasten {
     }
 
     fn open_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        trace_next_frame(window, "click_to_frame");
         self.selected = ix;
         self.open_selected(window, cx);
     }
@@ -534,6 +641,7 @@ impl LazyKasten {
     }
 
     fn on_browse(&mut self, _: &Browse, window: &mut Window, cx: &mut Context<Self>) {
+        trace_next_frame(window, "browse_to_frame");
         match self.screen {
             Screen::Editor => {
                 self.commit(window, cx);
@@ -573,18 +681,24 @@ impl LazyKasten {
         }
     }
 
-    fn on_select_prev(&mut self, _: &SelectPrev, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_select_prev(&mut self, _: &SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Themes {
+            trace_next_frame(window, "theme_preview_to_frame");
+        }
         self.move_selection(-1, cx);
     }
 
-    fn on_select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Themes {
+            trace_next_frame(window, "theme_preview_to_frame");
+        }
         self.move_selection(1, cx);
     }
 
     // -- rendering ---------------------------------------------------------
 
     fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = row_colors(cx);
         let status = self.status.clone();
         let chips: Vec<String> = self.live_tags.clone();
 
@@ -721,8 +835,8 @@ impl LazyKasten {
             }
             Screen::TagIndex(tag) => format!("#{tag} \u{00B7} {} notes", self.notes.len()),
             Screen::Search => {
-                if self.notes.len() >= 500 {
-                    "500+ matches, best first".to_string()
+                if self.notes.len() >= 200 {
+                    "200+ matches".to_string()
                 } else {
                     format!("{} matches", self.notes.len())
                 }
@@ -734,7 +848,7 @@ impl LazyKasten {
     }
 
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
+        let theme = row_colors(cx);
         let selected = ix == self.selected;
         let mut row = div()
             .id(ix)
@@ -826,7 +940,7 @@ impl LazyKasten {
     }
 
     fn render_browser(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = row_colors(cx);
         let count = self.list_len();
         let heading = self.heading_text();
 
@@ -879,7 +993,10 @@ impl LazyKasten {
 
 /// The text after the last unclosed `[[`, if any.
 fn open_link_query(text: &str) -> Option<String> {
-    let start = text.rfind("[[")?;
+    // Scan at most the last 200 characters on each keystroke.
+    let from = text.char_indices().rev().nth(199).map(|(i, _)| i).unwrap_or(0);
+    let seg = &text[from..];
+    let start = seg.rfind("[[")? + from;
     let tail = &text[start + 2..];
     if tail.contains("]]") || tail.contains('\n') {
         None
@@ -968,7 +1085,7 @@ mod tests {
 
 impl Render for LazyKasten {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = row_colors(cx);
         let root = div()
             .key_context("LazyKasten")
             .on_action(cx.listener(Self::on_save_note))

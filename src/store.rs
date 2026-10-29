@@ -503,6 +503,14 @@ impl Store {
         Ok(out)
     }
 
+    pub fn backlink_count(&self, id: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM links WHERE to_id = ?1")?
+            .query_row(rusqlite::params![id], |r| r.get(0))?;
+        Ok(n)
+    }
+
     /// Notes that link to `id`, newest first.
     pub fn backlinks(&self, id: &str) -> Result<Vec<NoteSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
@@ -559,14 +567,19 @@ impl Store {
         } else {
             format!("{}*", parts.join(" "))
         };
-        let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare_cached(
+        // Queries up to 2 characters skip bm25 ranking and return newest
+        // first, so SQLite can stop early instead of ranking every hit.
+        let short = query.trim().chars().count() <= 2;
+        let order = if short { "n.id DESC" } else { "rank" };
+        let sql = format!(
             "SELECT n.id, n.title FROM notes_text f
              JOIN notes n ON n.rowid = f.rowid
              WHERE notes_text MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )?;
+             ORDER BY {order}
+             LIMIT ?2"
+        );
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(rusqlite::params![match_expr, limit], |r| {
             Ok(NoteSummary {
                 id: r.get(0)?,
@@ -728,6 +741,22 @@ mod tests {
         // 2-char query keeps prefix matching.
         let hits = store.search("Ap", 10).unwrap();
         assert!(hits.iter().any(|h| h.id == "20260101000002"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_search_short_query_newest_first() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000001", "About the first note").unwrap();
+        store.save("20260101000003", "About the third note").unwrap();
+        store.save("20260101000002", "About the second note").unwrap();
+        let hits = store.search("Ab", 10).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["20260101000003", "20260101000002", "20260101000001"]
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

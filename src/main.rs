@@ -331,6 +331,11 @@ fn main() {
                             show_and_focus(hwnd);
                             let _ = any_window.update(cx, |_, window, cx| {
                                 view.update(cx, |v, cx| v.on_show(window, cx));
+                                if trace::enabled() {
+                                    window.on_next_frame(move |_, _| {
+                                        trace::log(if first { "hotkey_first_frame" } else { "hotkey_frame" }, t0.elapsed());
+                                    });
+                                }
                             });
                             trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
                         }

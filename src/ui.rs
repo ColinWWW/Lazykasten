@@ -32,6 +32,7 @@ enum Screen {
     Tags,
     TagIndex(String),
     Search,
+    Backlinks(String),
 }
 
 pub struct LazyKasten {
@@ -49,6 +50,8 @@ pub struct LazyKasten {
     status: SharedString,
     keep_status: bool,
     suggestions: Vec<Suggestion>,
+    link_matches: Vec<NoteSummary>,
+    backlink_count: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -90,6 +93,8 @@ impl LazyKasten {
             status: SharedString::default(),
             keep_status: false,
             suggestions: Vec::new(),
+            link_matches: Vec::new(),
+            backlink_count: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -97,9 +102,17 @@ impl LazyKasten {
     fn on_editor_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value();
         let tags = parse_tags(&text);
-        // Typing must never lag: only re-render when the chips actually change.
-        if tags != self.live_tags {
+        // `[[` completion: matches show in the footer (a cursor popup is
+        // not available in this API); clicking one inserts the link.
+        let matches = match open_link_query(&text) {
+            Some(q) if q.trim().is_empty() => self.store.recent_notes(8).unwrap_or_default(),
+            Some(q) => self.store.search(q.trim(), 8).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        // Typing must never lag: only re-render when something visible changes.
+        if tags != self.live_tags || matches != self.link_matches {
             self.live_tags = tags;
+            self.link_matches = matches;
             cx.notify();
         }
     }
@@ -143,6 +156,8 @@ impl LazyKasten {
         self.saved_text = SharedString::default();
         self.live_tags.clear();
         self.suggestions.clear();
+        self.link_matches.clear();
+        self.backlink_count = 0;
         self.editor
             .update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
@@ -280,6 +295,9 @@ impl LazyKasten {
         match self.store.read(id) {
             Ok(text) => {
                 self.live_tags = parse_tags(&text);
+                self.backlink_count = self.store.backlinks(id).map(|b| b.len()).unwrap_or(0);
+                self.link_matches.clear();
+                self.suggestions.clear();
                 self.saved_text = text.clone().into();
                 self.note_id = Some(id.to_string());
                 self.editor
@@ -312,10 +330,19 @@ impl LazyKasten {
         cx.notify();
     }
 
+    pub fn show_backlinks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.note_id.clone() else { return };
+        self.notes = self.store.backlinks(&id).unwrap_or_default();
+        self.screen = Screen::Backlinks(id);
+        self.selected = 0;
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
     fn list_len(&self) -> usize {
         match self.screen {
             Screen::Tags => self.tags.len(),
-            Screen::TagIndex(_) | Screen::Search => self.notes.len(),
+            Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
             Screen::Editor => 0,
         }
     }
@@ -340,7 +367,7 @@ impl LazyKasten {
                     self.show_tag(&name, window, cx);
                 }
             }
-            Screen::TagIndex(_) | Screen::Search => {
+            Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => {
                 if let Some(note) = self.notes.get(self.selected) {
                     let id = note.id.clone();
                     self.open_note(&id, window, cx);
@@ -383,14 +410,15 @@ impl LazyKasten {
     }
 
     fn on_back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
-        // Esc first dismisses Ctrl+T suggestions in the editor.
-        if self.screen == Screen::Editor && !self.suggestions.is_empty() {
+        // Esc first dismisses Ctrl+T suggestions / `[[` matches in the editor.
+        if self.screen == Screen::Editor && (!self.suggestions.is_empty() || !self.link_matches.is_empty()) {
             self.suggestions.clear();
+            self.link_matches.clear();
             cx.notify();
             return;
         }
         match self.screen {
-            Screen::TagIndex(_) | Screen::Search => self.show_tags(window, cx),
+            Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.show_tags(window, cx),
             Screen::Tags => {
                 self.screen = Screen::Editor;
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
@@ -460,6 +488,49 @@ impl LazyKasten {
             );
         }
 
+        if self.note_id.is_some() {
+            let count = self.backlink_count;
+            chip_row = chip_row.child(
+                div()
+                    .id("backlinks")
+                    .cursor_pointer()
+                    .text_color(theme.blue)
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(format!("{count} backlinks"))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.show_backlinks(window, cx);
+                    })),
+            );
+        }
+
+        // `[[` matches shown above the footer; click inserts [[id|title]].
+        let mut link_bar = div().flex().flex_col().px_6();
+        for (j, note) in self.link_matches.clone().iter().enumerate() {
+            let id_for_click = note.id.clone();
+            let title_for_click = note.title.clone();
+            link_bar = link_bar.child(
+                div()
+                    .id(200 + j)
+                    .cursor_pointer()
+                    .text_color(theme.blue)
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(note.title.clone())
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        let text = this.editor.read(cx).value().to_string();
+                        let new_text = complete_link(&text, &id_for_click, &title_for_click);
+                        this.editor.update(cx, |s, cx| s.set_value(new_text.clone(), window, cx));
+                        this.live_tags = parse_tags(&new_text);
+                        this.link_matches.clear();
+                        cx.notify();
+                    })),
+            );
+        }
+        let link_bar: AnyElement = if self.link_matches.is_empty() {
+            div().into_any_element()
+        } else {
+            link_bar.border_t_1().border_color(theme.border).into_any_element()
+        };
+
         let right: AnyElement = if status.is_empty() {
             div()
                 .text_color(theme.muted_foreground)
@@ -483,6 +554,7 @@ impl LazyKasten {
                     .pt_4()
                     .child(Textarea::new(&self.editor).appearance(false).large().h_full()),
             )
+            .child(link_bar)
             .child(
                 div()
                     .h_8()
@@ -511,6 +583,7 @@ impl LazyKasten {
                     format!("{} matches", self.notes.len())
                 }
             }
+            Screen::Backlinks(_) => format!("Backlinks · {} notes", self.notes.len()),
             Screen::Editor => String::new(),
         }
     }
@@ -617,6 +690,25 @@ impl LazyKasten {
     }
 }
 
+/// The text after the last unclosed `[[`, if any.
+fn open_link_query(text: &str) -> Option<String> {
+    let start = text.rfind("[[")?;
+    let tail = &text[start + 2..];
+    if tail.contains("]]") || tail.contains('\n') {
+        None
+    } else {
+        Some(tail.to_string())
+    }
+}
+
+/// Replace the last unclosed `[[query` with `[[id|title]]`.
+fn complete_link(text: &str, id: &str, title: &str) -> String {
+    match text.rfind("[[") {
+        Some(start) => format!("{}[[{}|{}]]", &text[..start], id, title),
+        None => text.to_string(),
+    }
+}
+
 /// `20261028143205` (optionally suffixed) -> `2026-10-28 14:32`.
 fn date_of_id(id: &str) -> String {
     let b = id.as_bytes();
@@ -631,6 +723,23 @@ fn date_of_id(id: &str) -> String {
         )
     } else {
         id.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complete_link, open_link_query};
+
+    #[test]
+    fn test_link_completion() {
+        assert_eq!(open_link_query("hello [[Rus"), Some("Rus".to_string()));
+        assert_eq!(open_link_query("hello [[a]] done"), None);
+        assert_eq!(open_link_query("hello"), None);
+        assert_eq!(
+            complete_link("hello [[Rus", "20260101", "Rust note"),
+            "hello [[20260101|Rust note]]"
+        );
+        assert_eq!(complete_link("hello", "20260101", "T"), "hello");
     }
 }
 

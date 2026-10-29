@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagCount {
@@ -106,6 +106,24 @@ pub fn parse_tags(text: &str) -> Vec<String> {
     out
 }
 
+/// Parse `[[id]]` / `[[id|title]]` links. Returns target ids, deduplicated
+/// in order of appearance.
+pub fn parse_links(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else { break };
+        let inner = &after[..end];
+        let id = inner.split('|').next().unwrap_or("").trim();
+        if !id.is_empty() && !out.iter().any(|t| t == id) {
+            out.push(id.to_string());
+        }
+        rest = &after[end + 2..];
+    }
+    out
+}
+
 /// Title: first non-empty non-tag line, leading `#`s stripped, max 120 chars.
 pub fn title_of(text: &str) -> String {
     for line in text.lines() {
@@ -152,6 +170,7 @@ impl Store {
             tx.execute_batch(
                 "DROP TABLE IF EXISTS notes_vocab;
                  DROP TABLE IF EXISTS notes_text;
+                 DROP TABLE IF EXISTS links;
                  DROP TABLE IF EXISTS note_tags;
                  DROP TABLE IF EXISTS tags;
                  DROP TABLE IF EXISTS notes;",
@@ -176,6 +195,12 @@ impl Store {
                PRIMARY KEY (tag_id, note_id)
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS note_tags_by_note ON note_tags(note_id);
+             CREATE TABLE IF NOT EXISTS links (
+               from_id TEXT NOT NULL,
+               to_id   TEXT NOT NULL,
+               PRIMARY KEY (from_id, to_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS links_by_to ON links(to_id);
              CREATE VIRTUAL TABLE IF NOT EXISTS notes_text USING fts5(body);
              CREATE VIRTUAL TABLE IF NOT EXISTS notes_vocab USING fts5vocab(notes_text, 'row');",
         )?;
@@ -276,6 +301,13 @@ impl Store {
             "INSERT INTO notes_text(rowid, body) VALUES (?1, ?2)",
             rusqlite::params![rowid, text],
         )?;
+        conn.execute("DELETE FROM links WHERE from_id = ?1", rusqlite::params![id])?;
+        for to_id in parse_links(text) {
+            conn.execute(
+                "INSERT OR IGNORE INTO links(from_id, to_id) VALUES (?1, ?2)",
+                rusqlite::params![id, to_id],
+            )?;
+        }
         Ok(())
     }
 
@@ -286,6 +318,7 @@ impl Store {
         if let Some(rowid) = rowid {
             conn.execute("DELETE FROM notes_text WHERE rowid = ?1", rusqlite::params![rowid])?;
         }
+        conn.execute("DELETE FROM links WHERE from_id = ?1", rusqlite::params![id])?;
         conn.execute("DELETE FROM notes WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
@@ -405,6 +438,37 @@ impl Store {
         Ok(out)
     }
 
+    /// Notes that link to `id`, newest first.
+    pub fn backlinks(&self, id: &str) -> Result<Vec<NoteSummary>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.title FROM links l JOIN notes n ON n.id = l.from_id
+             WHERE l.to_id = ?1 ORDER BY n.id DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id], |r| {
+            Ok(NoteSummary { id: r.get(0)?, title: r.get(1)? })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Most recent notes, for the empty `[[` completion list.
+    pub fn recent_notes(&self, limit: i64) -> Result<Vec<NoteSummary>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare("SELECT id, title FROM notes ORDER BY id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(rusqlite::params![limit], |r| {
+            Ok(NoteSummary { id: r.get(0)?, title: r.get(1)? })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<NoteSummary>> {
         let words: Vec<&str> = query.split_whitespace().collect();
         if words.is_empty() {
@@ -494,6 +558,33 @@ mod tests {
         assert_eq!(parse_tags("TAG: One"), vec!["One"]);
         // Hashtag with slash/underscore/dash.
         assert_eq!(parse_tags("see #a/b_c-d end"), vec!["a/b_c-d"]);
+    }
+
+    #[test]
+    fn test_parse_links() {
+        assert_eq!(
+            parse_links("see [[20260101|Some Title]] and [[20260102]] and [[20260101]] again [[unclosed"),
+            vec!["20260101", "20260102"]
+        );
+        assert_eq!(parse_links("no links, just [one] bracket"), Vec::<String>::new());
+        assert_eq!(parse_links("[[]] [[|empty]]"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_links_and_backlinks_round_trip() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000001", "Target note").unwrap();
+        store.save("20260101000002", "Linker\nsee [[20260101000001|Target note]]").unwrap();
+        store.save("20260101000003", "Other\nno link here").unwrap();
+        let backs = store.backlinks("20260101000001").unwrap();
+        assert_eq!(backs.len(), 1);
+        assert_eq!(backs[0].id, "20260101000002");
+        // Editing the link away removes the backlink.
+        store.save("20260101000002", "Linker\nlink removed").unwrap();
+        assert!(store.backlinks("20260101000001").unwrap().is_empty());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

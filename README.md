@@ -46,6 +46,12 @@ name appears in the note gets a boost. The more you tag, the better it gets.
   chosen: apply at 0.4, suggest at 0.1, name boost +0.5 — precision matters
   more than recall, since a wrong tag annoys more than a missing one.
 
+## Links between notes
+
+Type `[[` in the editor and matching note titles appear above the footer;
+click one to insert `[[<id>|<title>]]`. Links are indexed, and an open note's
+footer shows its backlink count — click it to list the notes that link to it.
+
 ## Vault
 
 Notes are plain Markdown files you own (readable by Obsidian or any editor):

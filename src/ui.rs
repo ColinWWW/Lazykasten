@@ -52,6 +52,9 @@ pub struct LazyKasten {
     suggestions: Vec<Suggestion>,
     link_matches: Vec<NoteSummary>,
     backlink_count: usize,
+    note_total: i64,
+    search_gen: u64,
+    link_gen: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -95,6 +98,9 @@ impl LazyKasten {
             suggestions: Vec::new(),
             link_matches: Vec::new(),
             backlink_count: 0,
+            note_total: 0,
+            search_gen: 0,
+            link_gen: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -102,32 +108,75 @@ impl LazyKasten {
     fn on_editor_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value();
         let tags = parse_tags(&text);
-        // `[[` completion: matches show in the footer (a cursor popup is
-        // not available in this API); clicking one inserts the link.
-        let matches = match open_link_query(&text) {
-            Some(q) if q.trim().is_empty() => self.store.recent_notes(8).unwrap_or_default(),
-            Some(q) => self.store.search(q.trim(), 8).unwrap_or_default(),
-            None => Vec::new(),
-        };
-        // Typing must never lag: only re-render when something visible changes.
-        if tags != self.live_tags || matches != self.link_matches {
+        if tags != self.live_tags {
             self.live_tags = tags;
-            self.link_matches = matches;
             cx.notify();
+        }
+        // `[[` completion runs in the background (never on the typing path);
+        // a generation number drops stale results. Matches show in the
+        // footer; clicking one inserts the link.
+        self.link_gen += 1;
+        let seq = self.link_gen;
+        match open_link_query(&text) {
+            Some(q) => {
+                let store = self.store.clone();
+                let query = q.trim().to_string();
+                let task = cx.background_spawn(async move {
+                    if query.is_empty() {
+                        store.recent_notes(8).unwrap_or_default()
+                    } else {
+                        store.search(&query, 8).unwrap_or_default()
+                    }
+                });
+                cx.spawn(async move |this, cx| {
+                    let matches = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.link_gen == seq && matches != this.link_matches {
+                            this.link_matches = matches;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            None => {
+                if !self.link_matches.is_empty() {
+                    self.link_matches.clear();
+                    cx.notify();
+                }
+            }
         }
     }
 
     fn on_search_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().to_string();
+        self.search_gen += 1;
+        let seq = self.search_gen;
         if query.trim().is_empty() {
             self.tags = self.store.tags().unwrap_or_default();
+            self.note_total = self.store.note_count().unwrap_or(0);
             self.screen = Screen::Tags;
-        } else {
-            self.notes = self.store.search(&query, 500).unwrap_or_default();
-            self.screen = Screen::Search;
+            self.selected = 0;
+            cx.notify();
+            return;
         }
-        self.selected = 0;
+        // Search in the background; the previous results stay on screen
+        // until the new ones arrive, and stale generations are dropped.
+        self.screen = Screen::Search;
         cx.notify();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { store.search(&query, 500).unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let notes = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_gen == seq {
+                    this.notes = notes;
+                    this.selected = 0;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Called when the window is shown: fresh editor, cursor ready.
@@ -314,6 +363,7 @@ impl LazyKasten {
 
     pub fn show_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tags = self.store.tags().unwrap_or_default();
+        self.note_total = self.store.note_count().unwrap_or(0);
         self.screen = Screen::Tags;
         self.selected = 0;
         self.search
@@ -572,8 +622,7 @@ impl LazyKasten {
     fn heading_text(&self) -> String {
         match &self.screen {
             Screen::Tags => {
-                let notes = self.store.note_count().unwrap_or(0);
-                format!("{} tags · {} notes", self.tags.len(), notes)
+                format!("{} tags · {} notes", self.tags.len(), self.note_total)
             }
             Screen::TagIndex(tag) => format!("#{tag} · {} notes", self.notes.len()),
             Screen::Search => {

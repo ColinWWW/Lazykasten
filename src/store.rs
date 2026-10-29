@@ -145,6 +145,8 @@ pub fn title_of(text: &str) -> String {
 }
 
 pub struct Store {
+    #[allow(dead_code)] // read via data_dir (themes/settings)
+    root: PathBuf,
     notes_dir: PathBuf,
     conn: Mutex<rusqlite::Connection>,
 }
@@ -160,8 +162,10 @@ impl Store {
         let mut conn = rusqlite::Connection::open(&db_path)
             .with_context(|| format!("open {}", db_path.display()))?;
 
+        conn.set_prepared_statement_cache_capacity(64);
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;
+             PRAGMA temp_store = MEMORY; PRAGMA cache_size = -32000; PRAGMA mmap_size = 268435456;",
         )?;
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -206,9 +210,23 @@ impl Store {
         )?;
 
         Ok(Store {
+            root: root.to_path_buf(),
             notes_dir,
             conn: Mutex::new(conn),
         })
+    }
+
+    /// `<vault>/.lazykasten` — settings, user themes and the trace log live here.
+    #[allow(dead_code)] // used by theme settings from milestone 14 on
+    pub fn data_dir(&self) -> PathBuf {
+        self.root.join(".lazykasten")
+    }
+
+    /// Merge FTS segments / let SQLite tune itself. Cheap; run on quit and
+    /// after large syncs (which already run in the background).
+    pub fn optimize(&self) {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let _ = conn.execute("PRAGMA optimize", []);
     }
 
     /// Lock the index connection. Crate-internal so `autotag` can run its
@@ -276,44 +294,31 @@ impl Store {
             tags.push("inbox".to_string());
         }
         let title = title_of(text);
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO notes(id, title, mtime) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET title = excluded.title, mtime = excluded.mtime",
-            rusqlite::params![id, title, mtime],
-        )?;
-        conn.execute("DELETE FROM note_tags WHERE note_id = ?1", rusqlite::params![id])?;
+        )?.execute(rusqlite::params![id, title, mtime])?;
+        conn.prepare_cached("DELETE FROM note_tags WHERE note_id = ?1")?.execute(rusqlite::params![id])?;
         for tag in &tags {
-            conn.execute(
-                "INSERT OR IGNORE INTO tags(name) VALUES (?1)",
-                rusqlite::params![tag],
-            )?;
-            let tag_id: i64 = conn.query_row(
-                "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
-                rusqlite::params![tag],
-                |r| r.get(0),
-            )?;
-            conn.execute(
-                "INSERT OR IGNORE INTO note_tags(tag_id, note_id) VALUES (?1, ?2)",
-                rusqlite::params![tag_id, id],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO tags(name) VALUES (?1)")?
+                .execute(rusqlite::params![tag])?;
+            let tag_id: i64 = conn
+                .prepare_cached("SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE")?
+                .query_row(rusqlite::params![tag], |r| r.get(0))?;
+            conn.prepare_cached("INSERT OR IGNORE INTO note_tags(tag_id, note_id) VALUES (?1, ?2)")?
+                .execute(rusqlite::params![tag_id, id])?;
         }
         // FTS is keyed by notes.rowid; an upsert keeps the rowid.
-        let rowid: i64 = conn.query_row(
-            "SELECT rowid FROM notes WHERE id = ?1",
-            rusqlite::params![id],
-            |r| r.get(0),
-        )?;
-        conn.execute("DELETE FROM notes_text WHERE rowid = ?1", rusqlite::params![rowid])?;
-        conn.execute(
-            "INSERT INTO notes_text(rowid, body) VALUES (?1, ?2)",
-            rusqlite::params![rowid, text],
-        )?;
-        conn.execute("DELETE FROM links WHERE from_id = ?1", rusqlite::params![id])?;
+        let rowid: i64 = conn
+            .prepare_cached("SELECT rowid FROM notes WHERE id = ?1")?
+            .query_row(rusqlite::params![id], |r| r.get(0))?;
+        conn.prepare_cached("DELETE FROM notes_text WHERE rowid = ?1")?.execute(rusqlite::params![rowid])?;
+        conn.prepare_cached("INSERT INTO notes_text(rowid, body) VALUES (?1, ?2)")?
+            .execute(rusqlite::params![rowid, text])?;
+        conn.prepare_cached("DELETE FROM links WHERE from_id = ?1")?.execute(rusqlite::params![id])?;
         for to_id in parse_links(text) {
-            conn.execute(
-                "INSERT OR IGNORE INTO links(from_id, to_id) VALUES (?1, ?2)",
-                rusqlite::params![id, to_id],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO links(from_id, to_id) VALUES (?1, ?2)")?
+                .execute(rusqlite::params![id, to_id])?;
         }
         Ok(())
     }
@@ -352,7 +357,13 @@ impl Store {
                     Some(s) => s.to_string(),
                     None => continue,
                 };
-                let mtime = file_mtime_ms(&path).unwrap_or(0);
+                // DirEntry::metadata reuses the directory listing data on
+                // Windows (no extra syscall per file, unlike fs::metadata).
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64)
+                    .unwrap_or(0);
                 files.push((stem, path, mtime));
             }
         }
@@ -385,33 +396,43 @@ impl Store {
             .cloned()
             .collect();
 
-        let mut conn = self.conn.lock().expect("store lock poisoned");
-        // 3. Re-index in batches of 500 per transaction.
+        // 3. Re-index in batches of 500 per transaction, releasing the lock
+        // between batches so a hotkey query never waits for a whole sync.
         let count = to_index.len();
         for chunk in to_index.chunks(500) {
+            let mut conn = self.conn.lock().expect("store lock poisoned");
             let tx = conn.transaction()?;
             for (id, text, mtime) in chunk {
                 Self::index_note(&tx, id, text, *mtime)?;
             }
             tx.commit()?;
         }
+        if count > 1000 {
+            // Merge FTS segments after a big re-index (sync already runs in
+            // the background) so queries read fewer pages.
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let _ = conn.execute("INSERT INTO notes_text(notes_text) VALUES('optimize')", []);
+        }
         // 4. Remove rows for vanished files and delete orphan tags.
-        if !to_remove.is_empty() {
-            let tx = conn.transaction()?;
-            for id in &to_remove {
-                Self::remove_note(&tx, id)?;
+        {
+            let mut conn = self.conn.lock().expect("store lock poisoned");
+            if !to_remove.is_empty() {
+                let tx = conn.transaction()?;
+                for id in &to_remove {
+                    Self::remove_note(&tx, id)?;
+                }
+                tx.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)", [])?;
+                tx.commit()?;
+            } else {
+                conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)", [])?;
             }
-            tx.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)", [])?;
-            tx.commit()?;
-        } else {
-            conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM note_tags)", [])?;
         }
         Ok(count)
     }
 
     pub fn tags(&self) -> Result<Vec<TagCount>> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT t.name, COUNT(*) AS c FROM tags t
              JOIN note_tags nt ON nt.tag_id = t.id
              GROUP BY t.id
@@ -439,7 +460,7 @@ impl Store {
 
     fn notes_with_tag_impl(&self, tag: &str) -> Result<Vec<NoteSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT n.id, n.title FROM notes n
              JOIN note_tags nt ON nt.note_id = n.id
              JOIN tags t ON t.id = nt.tag_id
@@ -462,7 +483,7 @@ impl Store {
     /// Notes that link to `id`, newest first.
     pub fn backlinks(&self, id: &str) -> Result<Vec<NoteSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT n.id, n.title FROM links l JOIN notes n ON n.id = l.from_id
              WHERE l.to_id = ?1 ORDER BY n.id DESC",
         )?;
@@ -479,7 +500,7 @@ impl Store {
     /// Most recent notes, for the empty `[[` completion list.
     pub fn recent_notes(&self, limit: i64) -> Result<Vec<NoteSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare("SELECT id, title FROM notes ORDER BY id DESC LIMIT ?1")?;
+        let mut stmt = conn.prepare_cached("SELECT id, title FROM notes ORDER BY id DESC LIMIT ?1")?;
         let rows = stmt.query_map(rusqlite::params![limit], |r| {
             Ok(NoteSummary { id: r.get(0)?, title: r.get(1)? })
         })?;
@@ -506,9 +527,17 @@ impl Store {
             .iter()
             .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
             .collect();
-        let match_expr = format!("{}*", parts.join(" "));
+        // A single 1-character query is an exact-term search: a 1-char
+        // prefix is the FTS worst case and rarely what the user means.
+        // Prefix matching starts at 2 characters.
+        let single_char = words.len() == 1 && words[0].chars().count() == 1;
+        let match_expr = if single_char {
+            parts.join(" ")
+        } else {
+            format!("{}*", parts.join(" "))
+        };
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT n.id, n.title FROM notes_text f
              JOIN notes n ON n.rowid = f.rowid
              WHERE notes_text MATCH ?1
@@ -660,6 +689,22 @@ mod tests {
         assert!(!store.note_path("20260101000001").exists());
         assert_eq!(store.note_count().unwrap(), 2);
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_search_single_letter_is_exact() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000001", "A standalone letter note").unwrap();
+        store.save("20260101000002", "Apple orchard notes").unwrap();
+        // 1-char query: exact term only, so "Apple" must not match "a".
+        let hits = store.search("a", 10).unwrap();
+        assert_eq!(hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["20260101000001"]);
+        // 2-char query keeps prefix matching.
+        let hits = store.search("Ap", 10).unwrap();
+        assert!(hits.iter().any(|h| h.id == "20260101000002"));
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

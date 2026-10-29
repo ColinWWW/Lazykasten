@@ -264,7 +264,10 @@ fn main() {
             focus: false,
             ..Default::default()
         };
+        let hwnd_cell = Rc::new(Cell::new(HWND::default()));
+        let hwnd_cell_for_window = hwnd_cell.clone();
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
+            hwnd_cell_for_window.set(hwnd_of(window));
             let view = cx.new(|cx| ui::LazyKasten::new(view_store, window, cx));
             // The close button hides; it never quits.
             let view_for_close = view.clone();
@@ -293,52 +296,51 @@ fn main() {
         }
 
         // Command loop: hotkey/tray callbacks only send into the channel;
-        // all window work happens here on the UI thread.
+        // all window work happens here on the UI thread. Raw Win32 calls
+        // (placement, ShowWindow) run *outside* `window.update`: a
+        // cross-monitor SetWindowPos re-enters GPUI's move handler, which
+        // panics on the already-borrowed App if called inside the update.
         let placed = Rc::new(Cell::new(false));
+        let quit_store = store.clone();
         cx.spawn(async move |cx| {
             while let Ok(cmd) = rx.recv().await {
                 let view = view.clone();
                 let placed = placed.clone();
-                let _ = any_window.update(cx, |_, window, cx| {
-                    let hwnd = hwnd_of(window);
-                    unsafe {
-                        match cmd {
-                            Command::Toggle => {
-                                if IsWindowVisible(hwnd).as_bool() {
-                                    view.update(cx, |v, cx| v.commit(window, cx));
-                                    let _ = ShowWindow(hwnd, SW_HIDE);
-                                } else {
-                                    let t0 = std::time::Instant::now();
-                                    let first = !placed.get();
-                                    if first {
-                                        place_on_cursor_monitor(hwnd);
-                                        placed.set(true);
-                                    }
-                                    show_and_focus(hwnd);
-                                    view.update(cx, |v, cx| v.on_show(window, cx));
-                                    trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
-                                }
-                            }
-                            Command::Show => {
-                                if !IsWindowVisible(hwnd).as_bool() {
-                                    let t0 = std::time::Instant::now();
-                                    let first = !placed.get();
-                                    if first {
-                                        place_on_cursor_monitor(hwnd);
-                                        placed.set(true);
-                                    }
-                                    show_and_focus(hwnd);
-                                    view.update(cx, |v, cx| v.on_show(window, cx));
-                                    trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
-                                }
-                            }
-                            Command::Quit => {
-                                view.update(cx, |v, cx| v.commit(window, cx));
-                                cx.quit();
-                            }
+                let hwnd = hwnd_cell.get();
+                let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+                match cmd {
+                    Command::Toggle if visible => {
+                        let _ = any_window.update(cx, |_, window, cx| {
+                            view.update(cx, |v, cx| v.commit(window, cx));
+                        });
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
                         }
                     }
-                });
+                    Command::Toggle | Command::Show => {
+                        if !visible {
+                            let t0 = std::time::Instant::now();
+                            let first = !placed.get();
+                            if first {
+                                place_on_cursor_monitor(hwnd);
+                                placed.set(true);
+                            }
+                            show_and_focus(hwnd);
+                            let _ = any_window.update(cx, |_, window, cx| {
+                                view.update(cx, |v, cx| v.on_show(window, cx));
+                            });
+                            trace::log(if first { "hotkey_show_first" } else { "hotkey_show" }, t0.elapsed());
+                        }
+                    }
+                    Command::Quit => {
+                        let quit_store = quit_store.clone();
+                        let _ = any_window.update(cx, |_, window, cx| {
+                            view.update(cx, |v, cx| v.commit(window, cx));
+                            quit_store.optimize();
+                            cx.quit();
+                        });
+                    }
+                }
             }
         })
         .detach();

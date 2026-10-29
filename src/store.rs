@@ -144,6 +144,19 @@ pub fn title_of(text: &str) -> String {
     "Untitled".to_string()
 }
 
+
+/// Read a note file as text: strip a leading UTF-8 BOM (PowerShell 5.1's
+/// `Set-Content -Encoding UTF8` writes one) and decode lossily, so one
+/// Windows-1252 note from an old editor can never abort a whole sync.
+/// Returns `(text, needed_lossy_decoding)`.
+pub fn decode_note_bytes(bytes: &[u8]) -> (String, bool) {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (text.to_string(), false),
+        Err(_) => (String::from_utf8_lossy(bytes).into_owned(), true),
+    }
+}
+
 pub struct Store {
     #[allow(dead_code)] // read via data_dir (themes/settings)
     root: PathBuf,
@@ -255,7 +268,8 @@ impl Store {
     }
 
     pub fn read(&self, id: &str) -> Result<String> {
-        Ok(std::fs::read_to_string(self.note_path(id))?)
+        let bytes = std::fs::read(self.note_path(id))?;
+        Ok(decode_note_bytes(&bytes).0)
     }
 
     /// Save a note. Empty text deletes the file and its index rows.
@@ -383,12 +397,21 @@ impl Store {
 
         let file_ids: HashSet<String> = files.iter().map(|(id, _, _)| id.clone()).collect();
         let mut to_index: Vec<(String, String, i64)> = Vec::new();
+        let mut lossy_files = 0usize;
         for (id, path, mtime) in &files {
             if db_map.get(id) != Some(mtime) {
-                // Read contents before taking the lock.
-                let text = std::fs::read_to_string(path)?;
+                // Read contents before taking the lock. Bytes + lossy
+                // decode: one non-UTF-8 file must not fail the sync.
+                let bytes = std::fs::read(path)?;
+                let (text, lossy) = decode_note_bytes(&bytes);
+                if lossy {
+                    lossy_files += 1;
+                }
                 to_index.push((id.clone(), text, *mtime));
             }
+        }
+        if lossy_files > 0 {
+            crate::trace::info(&format!("sync_with_disk: {lossy_files} file(s) needed lossy decoding"));
         }
         let to_remove: Vec<String> = db_map
             .keys()
@@ -705,6 +728,29 @@ mod tests {
         // 2-char query keeps prefix matching.
         let hits = store.search("Ap", 10).unwrap();
         assert!(hits.iter().any(|h| h.id == "20260101000002"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_bom_and_lossy_notes_are_indexed() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        // BOM-prefixed tagged note (as PowerShell 5.1 Set-Content writes).
+        let mut bom = b"\xEF\xBB\xBF".to_vec();
+        bom.extend_from_slice("BOM title\nBody text\nTag: Rust".as_bytes());
+        std::fs::write(store.note_path("20260101000001"), &bom).unwrap();
+        // Windows-1252 note: 0xE9 is not valid UTF-8 on its own.
+        std::fs::write(store.note_path("20260101000002"), b"Caf\xE9 note\nBody\nTag: Cooking").unwrap();
+        assert_eq!(store.sync_with_disk().unwrap(), 2);
+        assert_eq!(store.notes_with_tag("Rust").unwrap().len(), 1);
+        assert_eq!(store.notes_with_tag("Cooking").unwrap().len(), 1);
+        assert_eq!(store.notes_with_tag("Rust").unwrap()[0].title, "BOM title");
+        let (text, lossy) = decode_note_bytes(b"\xEF\xBB\xBFhello");
+        assert_eq!(text, "hello");
+        assert!(!lossy);
+        let (_, lossy) = decode_note_bytes(b"caf\xE9");
+        assert!(lossy);
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -30,6 +30,12 @@ $topics = @(
        Body = "idea brainstorm project sketch plan experiment prototype journal reflection morning pages creative spark" }
 )
 
+# UTF-8 without BOM (PowerShell 5.1 Set-Content -Encoding UTF8 writes a BOM).
+$utf8 = [Text.UTF8Encoding]::new($false)
+function Write-Note($id, $content) {
+    [IO.File]::WriteAllText((Join-Path $notesDir "$id.md"), $content, $utf8)
+}
+
 $base = Get-Date "2026-01-01T09:00:00"
 $written = 0
 for ($i = 0; $i -lt 300; $i++) {
@@ -37,7 +43,7 @@ for ($i = 0; $i -lt 300; $i++) {
     $title = $topic.Titles[[int]($i / $topics.Count) % $topic.Titles.Count]
     $id = $base.AddSeconds($i * 137).ToString("yyyyMMddHHmmss")
     $content = "$title`n$($topic.Body) session$i note$i`nTag: $($topic.Tag)"
-    Set-Content -Path (Join-Path $notesDir "$id.md") -Value $content -Encoding UTF8
+    Write-Note $id $content
     $written++
 }
 
@@ -54,7 +60,7 @@ $untaggedBodies = @(
 for ($i = 0; $i -lt 20; $i++) {
     $id = $base.AddSeconds(50000 + $i * 149).ToString("yyyyMMddHHmmss")
     $content = "Untagged thought $($i + 1)`n$($untaggedBodies[$i % $untaggedBodies.Count])"
-    Set-Content -Path (Join-Path $notesDir "$id.md") -Value $content -Encoding UTF8
+    Write-Note $id $content
     $written++
 }
 

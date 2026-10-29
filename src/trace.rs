@@ -23,6 +23,17 @@ pub fn enabled() -> bool {
     *ENABLED.get().unwrap_or(&false)
 }
 
+/// Append a plain note line (same off-cost as `log`).
+pub fn info(msg: &str) {
+    if !enabled() {
+        return;
+    }
+    let Some(path) = PATH.get() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 /// Append one timing line. Callers pass an already-measured duration; when
 /// tracing is off this returns after one branch.
 pub fn log(op: &str, dur: Duration) {

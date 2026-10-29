@@ -70,9 +70,9 @@ impl LazyKasten {
         let editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .soft_wrap(true)
-                .placeholder("Capture a thoughtâ€¦  (Tag: a, b  or  #hashtags)")
+                .placeholder("Capture a thought\u{2026}  (Tag: a, b  or  #hashtags)")
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search all notesâ€¦"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search all notes\u{2026}"));
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&editor, window, |this, _editor, ev: &InputEvent, window, cx| {
@@ -717,9 +717,9 @@ impl LazyKasten {
     fn heading_text(&self) -> String {
         match &self.screen {
             Screen::Tags => {
-                format!("{} tags Â· {} notes", self.tags.len(), self.note_total)
+                format!("{} tags \u{00B7} {} notes", self.tags.len(), self.note_total)
             }
-            Screen::TagIndex(tag) => format!("#{tag} Â· {} notes", self.notes.len()),
+            Screen::TagIndex(tag) => format!("#{tag} \u{00B7} {} notes", self.notes.len()),
             Screen::Search => {
                 if self.notes.len() >= 500 {
                     "500+ matches, best first".to_string()
@@ -727,7 +727,7 @@ impl LazyKasten {
                     format!("{} matches", self.notes.len())
                 }
             }
-            Screen::Backlinks(_) => format!("Backlinks Â· {} notes", self.notes.len()),
+            Screen::Backlinks(_) => format!("Backlinks \u{00B7} {} notes", self.notes.len()),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
             Screen::Editor => String::new(),
         }
@@ -846,9 +846,9 @@ impl LazyKasten {
                     .px_4()
                     .text_color(theme.muted_foreground)
                     .child(match self.screen {
-                        Screen::Tags => "â†‘â†“ select   Enter open   Esc back   Ctrl+Shift+T sweep inbox   Alt+J hide",
-                        Screen::Themes => "â†‘â†“ preview   Enter keep   Esc revert   Alt+J hide",
-                        _ => "â†‘â†“ select   Enter open   Esc back   Alt+J hide",
+                        Screen::Tags => "\u{2191}\u{2193} select   Enter open   Esc back   Ctrl+Shift+T sweep inbox   Alt+J hide",
+                        Screen::Themes => "\u{2191}\u{2193} preview   Enter keep   Esc revert   Alt+J hide",
+                        _ => "\u{2191}\u{2193} select   Enter open   Esc back   Alt+J hide",
                     }),
             )
     }
@@ -904,6 +904,42 @@ mod tests {
             "hello [[20260101|Rust note]]"
         );
         assert_eq!(complete_link("hello", "20260101", "T"), "hello");
+    }
+
+    /// Guard: no mojibake (UTF-8 read as Windows-1252 and saved back) may
+    /// ship in source or theme files again. Patterns are built from escapes
+    /// so this file itself stays pure ASCII around them.
+    #[test]
+    fn test_no_mojibake_in_source_or_themes() {
+        let patterns: Vec<String> = vec![
+            "\u{00E2}\u{20AC}".to_string(),
+            "\u{00E2}\u{2020}".to_string(),
+            "\u{00C2}\u{00B7}".to_string(),
+            "\u{00C3}".to_string(),
+            "\u{FFFD}".to_string(),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0usize;
+        for dir in ["src", "themes"] {
+            let mut stack = vec![root.join(dir)];
+            while let Some(path) = stack.pop() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    let entry = entry.unwrap();
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["rs", "json", "md"].contains(&e)) {
+                        let text = std::fs::read_to_string(&p)
+                            .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+                        for pat in &patterns {
+                            assert!(!text.contains(pat.as_str()), "{} contains mojibake {pat:?}", p.display());
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked >= 25, "guard only checked {checked} files");
     }
 }
 

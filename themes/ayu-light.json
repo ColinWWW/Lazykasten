@@ -1,0 +1,26 @@
+{
+  "name": "Ayu",
+  "themes": [
+    {
+      "name": "Ayu Light",
+      "mode": "light",
+      "colors": {
+        "background": "#fafafa",
+        "foreground": "#505559",
+        "border": "#f0f0f0",
+        "caret": "#505559",
+        "selection.background": "#f0f0f0",
+        "muted.foreground": "#69737d",
+        "list.hover.background": "#f0f0f0",
+        "list.active.background": "#f0f0f0",
+        "list.active.border": "#2b76ac",
+        "input.border": "#f0f0f0",
+        "popover.background": "#ffffff",
+        "popover.foreground": "#505559",
+        "ring": "#2b76ac",
+        "scrollbar.thumb.background": "#69737d",
+        "base.blue": "#2b76ac"
+      }
+    }
+  ]
+}

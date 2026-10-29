@@ -1,0 +1,26 @@
+{
+  "name": "GitHub",
+  "themes": [
+    {
+      "name": "GitHub Light",
+      "mode": "light",
+      "colors": {
+        "background": "#ffffff",
+        "foreground": "#1f2328",
+        "border": "#eaeef2",
+        "caret": "#1f2328",
+        "selection.background": "#eaeef2",
+        "muted.foreground": "#59636e",
+        "list.hover.background": "#eaeef2",
+        "list.active.background": "#eaeef2",
+        "list.active.border": "#0969da",
+        "input.border": "#eaeef2",
+        "popover.background": "#ffffff",
+        "popover.foreground": "#1f2328",
+        "ring": "#0969da",
+        "scrollbar.thumb.background": "#59636e",
+        "base.blue": "#0969da"
+      }
+    }
+  ]
+}

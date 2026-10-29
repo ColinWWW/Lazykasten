@@ -6,6 +6,7 @@
 
 mod autotag;
 mod store;
+mod themes;
 mod trace;
 mod ui;
 
@@ -17,7 +18,6 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
 };
-use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
@@ -169,9 +169,12 @@ fn main() {
     }
     let start_hidden = std::env::args().any(|a| a == "--hidden");
 
+    // The saved theme name is read before the app starts so startup parses
+    // only that one theme (the rest load when the picker first opens).
+    let theme_data_dir = store.data_dir();
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        themes::apply_saved(cx, &theme_data_dir);
         ui::bind_keys(cx);
         // A hidden window must never quit the app.
         cx.set_quit_mode(QuitMode::Explicit);

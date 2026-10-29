@@ -1,0 +1,26 @@
+{
+  "name": "Tokyo Night",
+  "themes": [
+    {
+      "name": "Tokyo Night",
+      "mode": "dark",
+      "colors": {
+        "background": "#1a1b26",
+        "foreground": "#c0caf5",
+        "border": "#292e42",
+        "caret": "#c0caf5",
+        "selection.background": "#292e42",
+        "muted.foreground": "#9aa5ce",
+        "list.hover.background": "#292e42",
+        "list.active.background": "#292e42",
+        "list.active.border": "#7aa2f7",
+        "input.border": "#292e42",
+        "popover.background": "#16161e",
+        "popover.foreground": "#c0caf5",
+        "ring": "#7aa2f7",
+        "scrollbar.thumb.background": "#9aa5ce",
+        "base.blue": "#7aa2f7"
+      }
+    }
+  ]
+}

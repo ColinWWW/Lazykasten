@@ -1,0 +1,26 @@
+{
+  "name": "Nord",
+  "themes": [
+    {
+      "name": "Nord",
+      "mode": "dark",
+      "colors": {
+        "background": "#2e3440",
+        "foreground": "#d8dee9",
+        "border": "#3b4252",
+        "caret": "#d8dee9",
+        "selection.background": "#3b4252",
+        "muted.foreground": "#a7b3cc",
+        "list.hover.background": "#3b4252",
+        "list.active.background": "#3b4252",
+        "list.active.border": "#88c0d0",
+        "input.border": "#3b4252",
+        "popover.background": "#272c36",
+        "popover.foreground": "#d8dee9",
+        "ring": "#88c0d0",
+        "scrollbar.thumb.background": "#a7b3cc",
+        "base.blue": "#88c0d0"
+      }
+    }
+  ]
+}

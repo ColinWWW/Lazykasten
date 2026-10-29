@@ -3664,6 +3664,7 @@ dependencies = [
  "gpui-kit",
  "raw-window-handle",
  "rusqlite",
+ "serde_json",
  "tray-icon",
  "windows 0.62.2",
 ]

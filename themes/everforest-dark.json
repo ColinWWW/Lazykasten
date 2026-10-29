@@ -1,0 +1,26 @@
+{
+  "name": "Everforest",
+  "themes": [
+    {
+      "name": "Everforest Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#2d353b",
+        "foreground": "#d3c6aa",
+        "border": "#343f44",
+        "caret": "#d3c6aa",
+        "selection.background": "#343f44",
+        "muted.foreground": "#94a098",
+        "list.hover.background": "#343f44",
+        "list.active.background": "#343f44",
+        "list.active.border": "#83c092",
+        "input.border": "#343f44",
+        "popover.background": "#272e33",
+        "popover.foreground": "#d3c6aa",
+        "ring": "#83c092",
+        "scrollbar.thumb.background": "#94a098",
+        "base.blue": "#83c092"
+      }
+    }
+  ]
+}

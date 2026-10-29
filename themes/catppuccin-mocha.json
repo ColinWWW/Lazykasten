@@ -1,0 +1,26 @@
+{
+  "name": "Catppuccin",
+  "themes": [
+    {
+      "name": "Catppuccin Mocha",
+      "mode": "dark",
+      "colors": {
+        "background": "#1e1e2e",
+        "foreground": "#cdd6f4",
+        "border": "#313244",
+        "caret": "#cdd6f4",
+        "selection.background": "#313244",
+        "muted.foreground": "#a6adc8",
+        "list.hover.background": "#313244",
+        "list.active.background": "#313244",
+        "list.active.border": "#89b4fa",
+        "input.border": "#313244",
+        "popover.background": "#181825",
+        "popover.foreground": "#cdd6f4",
+        "ring": "#89b4fa",
+        "scrollbar.thumb.background": "#a6adc8",
+        "base.blue": "#89b4fa"
+      }
+    }
+  ]
+}

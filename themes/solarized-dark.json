@@ -1,0 +1,26 @@
+{
+  "name": "Solarized",
+  "themes": [
+    {
+      "name": "Solarized Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#002b36",
+        "foreground": "#eee8d5",
+        "border": "#073642",
+        "caret": "#eee8d5",
+        "selection.background": "#073642",
+        "muted.foreground": "#93a1a1",
+        "list.hover.background": "#073642",
+        "list.active.background": "#073642",
+        "list.active.border": "#3694d5",
+        "input.border": "#073642",
+        "popover.background": "#00212b",
+        "popover.foreground": "#eee8d5",
+        "ring": "#3694d5",
+        "scrollbar.thumb.background": "#93a1a1",
+        "base.blue": "#3694d5"
+      }
+    }
+  ]
+}

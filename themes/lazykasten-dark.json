@@ -1,0 +1,26 @@
+{
+  "name": "Lazykasten",
+  "themes": [
+    {
+      "name": "Lazykasten Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#0a0a0a",
+        "foreground": "#fafafa",
+        "border": "#262626",
+        "caret": "#fafafa",
+        "selection.background": "#262626",
+        "muted.foreground": "#a3a3a3",
+        "list.hover.background": "#262626",
+        "list.active.background": "#262626",
+        "list.active.border": "#60a5fa",
+        "input.border": "#262626",
+        "popover.background": "#0a0a0a",
+        "popover.foreground": "#fafafa",
+        "ring": "#60a5fa",
+        "scrollbar.thumb.background": "#a3a3a3",
+        "base.blue": "#60a5fa"
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Catppuccin",
+  "themes": [
+    {
+      "name": "Catppuccin Frappe",
+      "mode": "dark",
+      "colors": {
+        "background": "#303446",
+        "foreground": "#c6d0f5",
+        "border": "#414559",
+        "caret": "#c6d0f5",
+        "selection.background": "#414559",
+        "muted.foreground": "#a5adce",
+        "list.hover.background": "#414559",
+        "list.active.background": "#414559",
+        "list.active.border": "#8caaee",
+        "input.border": "#414559",
+        "popover.background": "#292c3c",
+        "popover.foreground": "#c6d0f5",
+        "ring": "#8caaee",
+        "scrollbar.thumb.background": "#a5adce",
+        "base.blue": "#8caaee"
+      }
+    }
+  ]
+}

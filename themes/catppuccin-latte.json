@@ -1,0 +1,26 @@
+{
+  "name": "Catppuccin",
+  "themes": [
+    {
+      "name": "Catppuccin Latte",
+      "mode": "light",
+      "colors": {
+        "background": "#eff1f5",
+        "foreground": "#4c4f69",
+        "border": "#ccd0da",
+        "caret": "#4c4f69",
+        "selection.background": "#ccd0da",
+        "muted.foreground": "#696c82",
+        "list.hover.background": "#ccd0da",
+        "list.active.background": "#ccd0da",
+        "list.active.border": "#1d63ef",
+        "input.border": "#ccd0da",
+        "popover.background": "#e6e9ef",
+        "popover.foreground": "#4c4f69",
+        "ring": "#1d63ef",
+        "scrollbar.thumb.background": "#696c82",
+        "base.blue": "#1d63ef"
+      }
+    }
+  ]
+}

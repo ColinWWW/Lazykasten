@@ -1,0 +1,26 @@
+{
+  "name": "One Dark",
+  "themes": [
+    {
+      "name": "One Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#282c34",
+        "foreground": "#b1b8c4",
+        "border": "#3e4451",
+        "caret": "#b1b8c4",
+        "selection.background": "#3e4451",
+        "muted.foreground": "#98a2b3",
+        "list.hover.background": "#3e4451",
+        "list.active.background": "#3e4451",
+        "list.active.border": "#61afef",
+        "input.border": "#3e4451",
+        "popover.background": "#21252b",
+        "popover.foreground": "#b1b8c4",
+        "ring": "#61afef",
+        "scrollbar.thumb.background": "#98a2b3",
+        "base.blue": "#61afef"
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Catppuccin",
+  "themes": [
+    {
+      "name": "Catppuccin Macchiato",
+      "mode": "dark",
+      "colors": {
+        "background": "#24273a",
+        "foreground": "#cad3f5",
+        "border": "#363a4f",
+        "caret": "#cad3f5",
+        "selection.background": "#363a4f",
+        "muted.foreground": "#a5adcb",
+        "list.hover.background": "#363a4f",
+        "list.active.background": "#363a4f",
+        "list.active.border": "#8aadf4",
+        "input.border": "#363a4f",
+        "popover.background": "#1e2030",
+        "popover.foreground": "#cad3f5",
+        "ring": "#8aadf4",
+        "scrollbar.thumb.background": "#a5adcb",
+        "base.blue": "#8aadf4"
+      }
+    }
+  ]
+}

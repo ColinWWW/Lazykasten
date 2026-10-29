@@ -1,0 +1,26 @@
+{
+  "name": "Gruvbox",
+  "themes": [
+    {
+      "name": "Gruvbox Light",
+      "mode": "light",
+      "colors": {
+        "background": "#fbf1c7",
+        "foreground": "#3c3836",
+        "border": "#ebdbb2",
+        "caret": "#3c3836",
+        "selection.background": "#ebdbb2",
+        "muted.foreground": "#76695f",
+        "list.hover.background": "#ebdbb2",
+        "list.active.background": "#ebdbb2",
+        "list.active.border": "#3c7477",
+        "input.border": "#ebdbb2",
+        "popover.background": "#f2e5bc",
+        "popover.foreground": "#3c3836",
+        "ring": "#3c7477",
+        "scrollbar.thumb.background": "#76695f",
+        "base.blue": "#3c7477"
+      }
+    }
+  ]
+}

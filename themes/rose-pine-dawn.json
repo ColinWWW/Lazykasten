@@ -1,0 +1,26 @@
+{
+  "name": "Rose Pine",
+  "themes": [
+    {
+      "name": "Rose Pine Dawn",
+      "mode": "light",
+      "colors": {
+        "background": "#faf4ed",
+        "foreground": "#534e73",
+        "border": "#f2e9e1",
+        "caret": "#534e73",
+        "selection.background": "#f2e9e1",
+        "muted.foreground": "#706c88",
+        "list.hover.background": "#f2e9e1",
+        "list.active.background": "#f2e9e1",
+        "list.active.border": "#286983",
+        "input.border": "#f2e9e1",
+        "popover.background": "#fffaf3",
+        "popover.foreground": "#534e73",
+        "ring": "#286983",
+        "scrollbar.thumb.background": "#706c88",
+        "base.blue": "#286983"
+      }
+    }
+  ]
+}

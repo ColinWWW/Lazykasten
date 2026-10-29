@@ -1,0 +1,26 @@
+{
+  "name": "Rose Pine",
+  "themes": [
+    {
+      "name": "Rose Pine",
+      "mode": "dark",
+      "colors": {
+        "background": "#191724",
+        "foreground": "#e0def4",
+        "border": "#26233a",
+        "caret": "#e0def4",
+        "selection.background": "#26233a",
+        "muted.foreground": "#908caa",
+        "list.hover.background": "#26233a",
+        "list.active.background": "#26233a",
+        "list.active.border": "#9ccfd8",
+        "input.border": "#26233a",
+        "popover.background": "#1f1d2e",
+        "popover.foreground": "#e0def4",
+        "ring": "#9ccfd8",
+        "scrollbar.thumb.background": "#908caa",
+        "base.blue": "#9ccfd8"
+      }
+    }
+  ]
+}

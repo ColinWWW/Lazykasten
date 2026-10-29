@@ -1,0 +1,26 @@
+{
+  "name": "Kanagawa",
+  "themes": [
+    {
+      "name": "Kanagawa",
+      "mode": "dark",
+      "colors": {
+        "background": "#1f1f28",
+        "foreground": "#dcd7ba",
+        "border": "#2a2a37",
+        "caret": "#dcd7ba",
+        "selection.background": "#2a2a37",
+        "muted.foreground": "#a6a48f",
+        "list.hover.background": "#2a2a37",
+        "list.active.background": "#2a2a37",
+        "list.active.border": "#7e9cd8",
+        "input.border": "#2a2a37",
+        "popover.background": "#16161d",
+        "popover.foreground": "#dcd7ba",
+        "ring": "#7e9cd8",
+        "scrollbar.thumb.background": "#a6a48f",
+        "base.blue": "#7e9cd8"
+      }
+    }
+  ]
+}

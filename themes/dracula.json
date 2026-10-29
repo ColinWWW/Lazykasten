@@ -1,0 +1,26 @@
+{
+  "name": "Dracula",
+  "themes": [
+    {
+      "name": "Dracula",
+      "mode": "dark",
+      "colors": {
+        "background": "#282a36",
+        "foreground": "#f8f8f2",
+        "border": "#44475a",
+        "caret": "#f8f8f2",
+        "selection.background": "#44475a",
+        "muted.foreground": "#b8bdf0",
+        "list.hover.background": "#44475a",
+        "list.active.background": "#44475a",
+        "list.active.border": "#bd93f9",
+        "input.border": "#44475a",
+        "popover.background": "#21222c",
+        "popover.foreground": "#f8f8f2",
+        "ring": "#bd93f9",
+        "scrollbar.thumb.background": "#b8bdf0",
+        "base.blue": "#bd93f9"
+      }
+    }
+  ]
+}

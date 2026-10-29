@@ -1,0 +1,26 @@
+{
+  "name": "Ayu",
+  "themes": [
+    {
+      "name": "Ayu Mirage",
+      "mode": "dark",
+      "colors": {
+        "background": "#171b24",
+        "foreground": "#cccac2",
+        "border": "#1f2430",
+        "caret": "#cccac2",
+        "selection.background": "#1f2430",
+        "muted.foreground": "#959db0",
+        "list.hover.background": "#1f2430",
+        "list.active.background": "#1f2430",
+        "list.active.border": "#5ccfe6",
+        "input.border": "#1f2430",
+        "popover.background": "#10131a",
+        "popover.foreground": "#cccac2",
+        "ring": "#5ccfe6",
+        "scrollbar.thumb.background": "#959db0",
+        "base.blue": "#5ccfe6"
+      }
+    }
+  ]
+}

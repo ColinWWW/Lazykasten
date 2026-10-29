@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes]);
 
 /// Register keys. Must run after `gpui_kit::init` so the more specific
 /// `"TagSearch > Input"` context wins over the input's own `"Input"` bindings.
@@ -20,6 +20,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", Browse, Some("LazyKasten")),
         KeyBinding::new("ctrl-t", SuggestTags, Some("LazyKasten")),
         KeyBinding::new("ctrl-shift-t", SweepInbox, Some("LazyKasten")),
+        KeyBinding::new("ctrl-shift-p", OpenThemes, Some("LazyKasten")),
+        KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
         KeyBinding::new("up", SelectPrev, Some("TagSearch > Input")),
         KeyBinding::new("down", SelectNext, Some("TagSearch > Input")),
@@ -33,6 +35,7 @@ enum Screen {
     TagIndex(String),
     Search,
     Backlinks(String),
+    Themes,
 }
 
 pub struct LazyKasten {
@@ -55,6 +58,10 @@ pub struct LazyKasten {
     note_total: i64,
     search_gen: u64,
     link_gen: u64,
+    theme_entries: Vec<crate::themes::ThemeEntry>,
+    theme_filtered: Vec<usize>,
+    theme_original: String,
+    themes_loaded: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -63,9 +70,9 @@ impl LazyKasten {
         let editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .soft_wrap(true)
-                .placeholder("Capture a thought…  (Tag: a, b  or  #hashtags)")
+                .placeholder("Capture a thoughtâ€¦  (Tag: a, b  or  #hashtags)")
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search all notes…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search all notesâ€¦"));
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&editor, window, |this, _editor, ev: &InputEvent, window, cx| {
@@ -101,6 +108,10 @@ impl LazyKasten {
             note_total: 0,
             search_gen: 0,
             link_gen: 0,
+            theme_entries: Vec::new(),
+            theme_filtered: Vec::new(),
+            theme_original: String::new(),
+            themes_loaded: false,
             _subscriptions: subscriptions,
         }
     }
@@ -150,6 +161,20 @@ impl LazyKasten {
 
     fn on_search_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().to_string();
+        if self.screen == Screen::Themes {
+            let q = query.trim().to_lowercase();
+            self.theme_filtered = self
+                .theme_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| q.is_empty() || e.name.to_lowercase().contains(&q))
+                .map(|(i, _)| i)
+                .collect();
+            self.selected = 0;
+            self.preview_theme(cx);
+            cx.notify();
+            return;
+        }
         self.search_gen += 1;
         let seq = self.search_gen;
         if query.trim().is_empty() {
@@ -279,6 +304,12 @@ impl LazyKasten {
         .detach();
     }
 
+    fn on_open_themes(&mut self, _: &OpenThemes, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Themes {
+            self.open_themes(window, cx);
+        }
+    }
+
     fn on_sweep_inbox(&mut self, _: &SweepInbox, _window: &mut Window, cx: &mut Context<Self>) {
         if self.screen != Screen::Tags {
             return;
@@ -361,6 +392,58 @@ impl LazyKasten {
         cx.notify();
     }
 
+    /// Open the theme picker. All bundled/user themes are parsed only on
+    /// first open; moving the selection previews live, Enter keeps and
+    /// saves, Esc reverts to `theme_original`.
+    pub fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.themes_loaded {
+            let (entries, invalid) = crate::themes::load_picker_themes(cx, &self.store.data_dir());
+            self.theme_entries = entries;
+            self.themes_loaded = true;
+            if !invalid.is_empty() {
+                self.status = format!("Skipped invalid theme file(s): {}", invalid.join(", ")).into();
+                self.keep_status = true;
+            }
+        }
+        self.theme_original = cx.theme().theme_name().to_string();
+        self.theme_filtered = (0..self.theme_entries.len()).collect();
+        self.selected = self
+            .theme_entries
+            .iter()
+            .position(|e| e.name == self.theme_original)
+            .unwrap_or(0);
+        self.screen = Screen::Themes;
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    fn preview_theme(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self.theme_filtered.get(self.selected).and_then(|i| self.theme_entries.get(*i)) {
+            let name = entry.name.clone();
+            crate::themes::apply_registered(cx, &name);
+        }
+    }
+
+    fn keep_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.theme_filtered.get(self.selected).and_then(|i| self.theme_entries.get(*i)) {
+            let name = entry.name.clone();
+            crate::themes::apply_registered(cx, &name);
+            if name != self.theme_original {
+                let dir = self.store.data_dir();
+                let name_for_write = name.clone();
+                cx.background_spawn(async move {
+                    crate::themes::write_saved_theme(&dir, &name_for_write);
+                })
+                .detach();
+            }
+            self.theme_original = name;
+        }
+        self.screen = Screen::Editor;
+        self.editor.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
     pub fn show_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tags = self.store.tags().unwrap_or_default();
         self.note_total = self.store.note_count().unwrap_or(0);
@@ -393,6 +476,7 @@ impl LazyKasten {
         match self.screen {
             Screen::Tags => self.tags.len(),
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
+            Screen::Themes => self.theme_filtered.len(),
             Screen::Editor => 0,
         }
     }
@@ -406,6 +490,9 @@ impl LazyKasten {
         self.selected = next.clamp(0, len as i64 - 1) as usize;
         self.list_scroll
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+        if self.screen == Screen::Themes {
+            self.preview_theme(cx);
+        }
         cx.notify();
     }
 
@@ -423,6 +510,7 @@ impl LazyKasten {
                     self.open_note(&id, window, cx);
                 }
             }
+            Screen::Themes => self.keep_theme(window, cx),
             Screen::Editor => {}
         }
     }
@@ -468,6 +556,13 @@ impl LazyKasten {
             return;
         }
         match self.screen {
+            Screen::Themes => {
+                let original = self.theme_original.clone();
+                crate::themes::apply_registered(cx, &original);
+                self.screen = Screen::Editor;
+                self.editor.update(cx, |s, cx| s.focus(window, cx));
+                cx.notify();
+            }
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.show_tags(window, cx),
             Screen::Tags => {
                 self.screen = Screen::Editor;
@@ -584,7 +679,7 @@ impl LazyKasten {
         let right: AnyElement = if status.is_empty() {
             div()
                 .text_color(theme.muted_foreground)
-                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags   Ctrl+N new")
+                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags   Ctrl+Shift+P themes   Ctrl+N new")
                 .into_any_element()
         } else {
             div()
@@ -622,9 +717,9 @@ impl LazyKasten {
     fn heading_text(&self) -> String {
         match &self.screen {
             Screen::Tags => {
-                format!("{} tags · {} notes", self.tags.len(), self.note_total)
+                format!("{} tags Â· {} notes", self.tags.len(), self.note_total)
             }
-            Screen::TagIndex(tag) => format!("#{tag} · {} notes", self.notes.len()),
+            Screen::TagIndex(tag) => format!("#{tag} Â· {} notes", self.notes.len()),
             Screen::Search => {
                 if self.notes.len() >= 500 {
                     "500+ matches, best first".to_string()
@@ -632,7 +727,8 @@ impl LazyKasten {
                     format!("{} matches", self.notes.len())
                 }
             }
-            Screen::Backlinks(_) => format!("Backlinks · {} notes", self.notes.len()),
+            Screen::Backlinks(_) => format!("Backlinks Â· {} notes", self.notes.len()),
+            Screen::Themes => format!("{} themes", self.theme_filtered.len()),
             Screen::Editor => String::new(),
         }
     }
@@ -669,6 +765,25 @@ impl LazyKasten {
                         .text_color(theme.muted_foreground)
                         .child(format!("{}", tag.count)),
                 )
+            }
+            Screen::Themes => {
+                let entry = &self.theme_entries[self.theme_filtered[ix]];
+                let mut swatches = div().flex().items_center().gap_1();
+                for sw in entry.swatches {
+                    swatches = swatches.child(div().w_4().h_4().rounded_sm().bg(rgb(sw)));
+                }
+                row.child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(entry.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(if entry.dark { "dark" } else { "light" }),
+                )
+                .child(swatches)
             }
             _ => {
                 let note = &self.notes[ix];
@@ -730,10 +845,10 @@ impl LazyKasten {
                     .border_color(theme.border)
                     .px_4()
                     .text_color(theme.muted_foreground)
-                    .child(if self.screen == Screen::Tags {
-                        "↑↓ select   Enter open   Esc back   Ctrl+Shift+T sweep inbox   Alt+J hide"
-                    } else {
-                        "↑↓ select   Enter open   Esc back   Alt+J hide"
+                    .child(match self.screen {
+                        Screen::Tags => "â†‘â†“ select   Enter open   Esc back   Ctrl+Shift+T sweep inbox   Alt+J hide",
+                        Screen::Themes => "â†‘â†“ preview   Enter keep   Esc revert   Alt+J hide",
+                        _ => "â†‘â†“ select   Enter open   Esc back   Alt+J hide",
                     }),
             )
     }
@@ -805,6 +920,7 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_suggest_tags))
             .on_action(cx.listener(Self::on_sweep_inbox))
+            .on_action(cx.listener(Self::on_open_themes))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

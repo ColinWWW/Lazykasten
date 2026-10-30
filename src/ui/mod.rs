@@ -142,6 +142,7 @@ mod browser;
 mod editor;
 mod graph_view;
 mod listnav;
+pub mod style;
 mod switcher;
 mod themes;
 
@@ -173,6 +174,7 @@ fn trace_next_frame(window: &mut Window, op: &'static str) {
 
 /// Every themed colour one row/render pass needs, copied out of the theme
 /// once per full render instead of cloning the whole Theme per widget.
+/// (Design tokens for spacing/sizes live in `style::tokens`.)
 #[derive(Clone, Copy)]
 struct RowColors {
     background: Hsla,

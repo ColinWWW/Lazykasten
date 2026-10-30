@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp, RenameTag, UndoAutoTag, RelatedNotes]);
 
 /// Fuzzy title match: query chars must appear in order. The score
 /// favours word starts and consecutive runs. `None` = no match.
@@ -104,6 +104,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
         KeyBinding::new("ctrl-shift-backspace", DeleteNote, Some("LazyKasten")),
         KeyBinding::new("ctrl-p", QuickSwitcher, Some("LazyKasten")),
+        KeyBinding::new("f2", RenameTag, Some("TagSearch")),
+        KeyBinding::new("ctrl-z", UndoAutoTag, Some("LazyKasten")),
+        KeyBinding::new("ctrl-r", RelatedNotes, Some("LazyKasten")),
         KeyBinding::new("ctrl-/", KeyHelp, Some("LazyKasten")),
         KeyBinding::new("f1", KeyHelp, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
@@ -124,6 +127,7 @@ enum Screen {
     Trash,
     Switcher,
     Help,
+    Related,
 }
 
 /// Schedule a `trace` entry for the next painted frame (no-op cost when
@@ -252,6 +256,8 @@ pub struct LazyKasten {
     trash_count: usize,
     switcher_index: Vec<(String, String, String)>,
     switcher_results: Vec<NoteSummary>,
+    renaming: Option<String>,
+    autotag_undo: Vec<(String, Vec<String>)>,
     graph: Option<GraphView>,
     graph_focus: FocusHandle,
     return_to_graph: bool,
@@ -339,6 +345,8 @@ impl LazyKasten {
             trash_count: 0,
             switcher_index: Vec::new(),
             switcher_results: Vec::new(),
+            renaming: None,
+            autotag_undo: Vec::new(),
             graph: None,
             graph_focus: cx.focus_handle(),
             return_to_graph: false,
@@ -419,7 +427,7 @@ impl LazyKasten {
     }
 
     fn on_search_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.screen == Screen::Help {
+        if self.screen == Screen::Help || self.renaming.is_some() {
             return;
         }
         let query = self.search.read(cx).value().to_string();
@@ -573,21 +581,30 @@ impl LazyKasten {
                         None
                     } else {
                         match crate::autotag::apply_tags_if_unchanged(&store, &bg_id, &bg_text, &tags) {
-                            Ok(true) => Some(format!(
-                                "Auto-tagged: {}",
-                                tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")
+                            Ok(true) => Some((
+                                format!(
+                                    "Auto-tagged: {} (Ctrl+Z to undo)",
+                                    tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")
+                                ),
+                                Some((bg_id.clone(), tags)),
                             )),
                             Ok(false) => None,
-                            Err(e) => Some(format!("Auto-tagging failed: {e}")),
+                            Err(e) => Some((format!("Auto-tagging failed: {e}"), None)),
                         }
                     }
                 }
-                Err(e) => Some(format!("Auto-tagging failed: {e}")),
+                Err(e) => Some((format!("Auto-tagging failed: {e}"), None)),
             }
         });
         cx.spawn(async move |this, cx| {
-            if let Some(status) = task.await {
+            if let Some((status, undo)) = task.await {
                 let _ = this.update(cx, |this, cx| {
+                    if let Some(entry) = undo {
+                        this.autotag_undo.push(entry);
+                        if this.autotag_undo.len() > 10 {
+                            this.autotag_undo.remove(0);
+                        }
+                    }
                     this.status = status.into();
                     this.keep_status = true;
                     cx.notify();
@@ -846,6 +863,101 @@ impl LazyKasten {
             .map(|(title, _, id)| NoteSummary { id: id.clone(), title: title.clone() })
             .collect();
         cx.notify();
+    }
+
+    fn on_rename_tag(&mut self, _: &RenameTag, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Tags || self.selected >= self.tags.len() {
+            return;
+        }
+        let old = self.tags[self.selected].name.clone();
+        self.renaming = Some(old.clone());
+        self.status = format!("Rename #{old}: type the new name, Enter applies, Esc cancels").into();
+        self.keep_status = true;
+        self.search.update(cx, |s, cx| s.set_value(old, window, cx));
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    fn apply_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(old) = self.renaming.take() else { return };
+        let new = self.search.read(cx).value().trim().to_string();
+        if new.is_empty() || new.eq_ignore_ascii_case(&old) {
+            self.show_tags(window, cx);
+            return;
+        }
+        let store = self.store.clone();
+        let task_old = old.clone();
+        let task_new = new.clone();
+        let task = cx.background_spawn(async move { store.rename_tag(&task_old, &task_new) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.status = match &result {
+                    Ok(n) => format!("Renamed #{old} \u{2192} #{new} in {n} notes"),
+                    Err(e) => format!("Error: {e}"),
+                }
+                .into();
+                this.keep_status = true;
+                this.show_tags(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn on_undo_auto_tag(&mut self, _: &UndoAutoTag, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Editor {
+            return;
+        }
+        // Only right after auto-tagging: the editor must be untouched.
+        if self.editor.read(cx).value() != self.saved_text {
+            return;
+        }
+        let Some(open) = self.note_id.clone() else { return };
+        let Some(pos) = self.autotag_undo.iter().rposition(|(id, _)| *id == open) else {
+            return;
+        };
+        let (id, tags) = self.autotag_undo.remove(pos);
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move {
+            crate::autotag::remove_appended_tag_line(&store, &id, &tags)
+        });
+        cx.spawn(async move |this, cx| {
+            let done = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if done.unwrap_or(false) {
+                    this.status = "Auto-tagging undone \u{2014} back to #inbox".into();
+                    this.keep_status = true;
+                    let id = this.note_id.clone();
+                    if let Some(id) = id {
+                        this.open_note(&id, window, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn on_related_notes(&mut self, _: &RelatedNotes, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Editor {
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let exclude = self.note_id.clone().unwrap_or_default();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move {
+            crate::autotag::related_notes(&store, &exclude, &text, 10).unwrap_or_default()
+        });
+        cx.spawn(async move |this, cx| {
+            let notes = task.await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.notes = notes;
+                this.screen = Screen::Related;
+                this.selected = 0;
+                cx.notify();
+            });
+        })
+        .detach();
+        let _ = window;
     }
 
     fn on_key_help(&mut self, _: &KeyHelp, window: &mut Window, cx: &mut Context<Self>) {
@@ -1449,6 +1561,7 @@ impl LazyKasten {
             Screen::Trash => self.trash_notes.len(),
             Screen::Switcher => self.switcher_results.len(),
             Screen::Help => KEY_HELP.len(),
+            Screen::Related => self.notes.len(),
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
             Screen::Themes => self.theme_filtered.len(),
             Screen::Graph => 0,
@@ -1472,6 +1585,10 @@ impl LazyKasten {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.apply_rename(window, cx);
+            return;
+        }
         match &self.screen {
             Screen::Tags => {
                 if self.selected == self.tags.len() {
@@ -1510,7 +1627,7 @@ impl LazyKasten {
                     .detach();
                 }
             }
-            Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => {
+            Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) | Screen::Related => {
                 if let Some(note) = self.notes.get(self.selected) {
                     let id = note.id.clone();
                     self.return_to_graph = false;
@@ -1570,6 +1687,16 @@ impl LazyKasten {
     }
 
     fn on_back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            self.show_tags(window, cx);
+            return;
+        }
+        if self.screen == Screen::Related {
+            self.screen = Screen::Editor;
+            self.editor.update(cx, |s, cx| s.focus(window, cx));
+            cx.notify();
+            return;
+        }
         // Esc first dismisses Ctrl+T suggestions / `[[` matches in the editor.
         if self.screen == Screen::Editor && (!self.suggestions.is_empty() || !self.link_matches.is_empty()) {
             self.suggestions.clear();
@@ -1615,7 +1742,7 @@ impl LazyKasten {
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
                 cx.notify();
             }
-            Screen::Editor | Screen::Graph => {}
+            Screen::Editor | Screen::Graph | Screen::Related => {}
         }
     }
 
@@ -1783,6 +1910,7 @@ impl LazyKasten {
             Screen::Trash => format!("#trash \u{00B7} {} notes (Enter restores)", self.trash_notes.len()),
             Screen::Switcher => format!("Quick switch \u{00B7} {} of {} notes", self.switcher_results.len(), self.switcher_index.len()),
             Screen::Help => "Keys".to_string(),
+            Screen::Related => format!("Related \u{00B7} {} notes", self.notes.len()),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
             Screen::Graph => "Graph".to_string(),
             Screen::Editor => String::new(),
@@ -2343,6 +2471,9 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_delete_note))
             .on_action(cx.listener(Self::on_quick_switcher))
             .on_action(cx.listener(Self::on_key_help))
+            .on_action(cx.listener(Self::on_rename_tag))
+            .on_action(cx.listener(Self::on_undo_auto_tag))
+            .on_action(cx.listener(Self::on_related_notes))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::store::{Store, is_tag_line, parse_tags};
+use crate::store::{NoteSummary, Store, is_tag_line, parse_tags};
 
 /// Apply tags at or above this confidence automatically (at most 3).
 pub const AUTO_THRESHOLD: f64 = 0.4;
@@ -175,6 +175,15 @@ fn neighbors(
     exclude_id: &str,
     terms: &[String],
 ) -> Result<Vec<(String, f64)>> {
+    neighbors_filtered(store, exclude_id, terms, true)
+}
+
+fn neighbors_filtered(
+    store: &Store,
+    exclude_id: &str,
+    terms: &[String],
+    tagged_only: bool,
+) -> Result<Vec<(String, f64)>> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
@@ -183,14 +192,19 @@ fn neighbors(
         .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" OR ");
-    let conn = store.lock_conn();
-    let mut stmt = conn.prepare(
+    let tagged_clause = if tagged_only {
+        "AND EXISTS (SELECT 1 FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
+                       WHERE nt.note_id = n.id AND t.name != 'inbox' COLLATE NOCASE)"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT n.id, bm25(notes_text) FROM notes_text f JOIN notes n ON n.rowid = f.rowid
-         WHERE notes_text MATCH ?1 AND n.id != ?2
-           AND EXISTS (SELECT 1 FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
-                       WHERE nt.note_id = n.id AND t.name != 'inbox' COLLATE NOCASE)
-         ORDER BY rank LIMIT 20",
-    )?;
+         WHERE notes_text MATCH ?1 AND n.id != ?2 {tagged_clause}
+         ORDER BY rank LIMIT 20"
+    );
+    let conn = store.lock_conn();
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params![match_expr, exclude_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
     })?;
@@ -336,6 +350,57 @@ pub fn apply_tags_if_unchanged(
         return Ok(false);
     }
     store.save(id, &append_tag_line(&current, tags))?;
+    Ok(true)
+}
+
+/// The most similar notes to `text`, tagged or not (Ctrl+R).
+pub fn related_notes(
+    store: &Store,
+    exclude_id: &str,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<NoteSummary>> {
+    let terms = key_terms(store, text)?;
+    let near = neighbors_filtered(store, exclude_id, &terms, false)?;
+    let conn = store.lock_conn();
+    let mut out = Vec::new();
+    for (id, _) in near.into_iter().take(limit) {
+        if let Ok(title) = conn.query_row("SELECT title FROM notes WHERE id = ?1", rusqlite::params![id], |r| {
+            r.get::<_, String>(0)
+        }) {
+            out.push(NoteSummary { id: id.clone(), title });
+        }
+    }
+    Ok(out)
+}
+
+/// Undo an auto-tag: remove the appended `Tag:` line whose tag set is
+/// exactly `tags`. The note falls back to #inbox when it has no tags
+/// left. Returns true when a line was removed.
+pub fn remove_appended_tag_line(store: &Store, id: &str, tags: &[String]) -> Result<bool> {
+    let text = store.read(id)?;
+    let want: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let mut removed = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(rest) = is_tag_line(line.trim()) {
+            let vals: Vec<String> = rest
+                .split(',')
+                .map(|v| v.trim().to_lowercase())
+                .filter(|v| !v.is_empty())
+                .collect();
+            if vals.len() == want.len() && vals.iter().all(|v| want.contains(v)) {
+                removed = Some(i);
+            }
+        }
+    }
+    let Some(i) = removed else { return Ok(false) };
+    lines.remove(i);
+    // Drop the blank separator the append added, if now trailing.
+    if i > 0 && lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) && i == lines.len() {
+        lines.pop();
+    }
+    store.save(id, &lines.join("\n"))?;
     Ok(true)
 }
 

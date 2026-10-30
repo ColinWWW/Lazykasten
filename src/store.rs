@@ -434,6 +434,24 @@ impl Store {
         Ok(candidate)
     }
 
+    /// Rename (or merge) a tag across every note carrying it: `Tag:`
+    /// line entries and `#hashtags` are rewritten, files are written
+    /// atomically through `save`, then re-indexed by the same path.
+    /// Returns how many notes changed.
+    pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        let notes = self.notes_with_tag(old)?;
+        let mut changed = 0usize;
+        for note in &notes {
+            let text = self.read(&note.id)?;
+            let (rewritten, hit) = rewrite_tag_in_text(&text, old, new);
+            if hit {
+                self.save(&note.id, &rewritten)?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn index_note(conn: &rusqlite::Connection, id: &str, text: &str, mtime: i64) -> Result<()> {
         let mut tags = parse_tags(text);
         if tags.is_empty() {
@@ -810,6 +828,71 @@ impl Store {
     }
 }
 
+/// Rewrite tag `old` to `new` in a note's text: entries on `Tag:` lines
+/// (deduplicated, so a rename into an existing tag merges) and
+/// `#hashtags` (skipped when `new` contains whitespace, which a hashtag
+/// cannot). Returns the new text and whether anything changed.
+pub fn rewrite_tag_in_text(text: &str, old: &str, new: &str) -> (String, bool) {
+    let mut changed = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = is_tag_line(line.trim()) {
+            let head = &line[..line.find(':').map(|i| i + 1).unwrap_or(line.len())];
+            let mut vals: Vec<String> = Vec::new();
+            for v in rest.split(',') {
+                let v = v.trim();
+                if v.is_empty() {
+                    continue;
+                }
+                let mapped = if v.eq_ignore_ascii_case(old) { new.to_string() } else { v.to_string() };
+                if mapped != v {
+                    changed = true;
+                }
+                if !vals.iter().any(|x| x.eq_ignore_ascii_case(&mapped)) {
+                    vals.push(mapped);
+                } else if mapped.eq_ignore_ascii_case(new) && !v.eq_ignore_ascii_case(old) {
+                    // duplicate collapsed by the merge
+                    changed = true;
+                }
+            }
+            out_lines.push(format!("{} {}", head, vals.join(", ")));
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    let mut text = out_lines.join("\n");
+    if !new.chars().any(|c| c.is_whitespace()) {
+        // Hashtags: `#old` at a word boundary.
+        let chars: Vec<char> = text.chars().collect();
+        let mut rebuilt = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '#'
+                && (i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '#'))
+            {
+                let mut j = i + 1;
+                while j < chars.len()
+                    && (chars[j].is_alphanumeric() || matches!(chars[j], '-' | '_' | '/' | '.'))
+                {
+                    j += 1;
+                }
+                let token: String = chars[i + 1..j].iter().collect();
+                if !token.is_empty() && token.eq_ignore_ascii_case(old) {
+                    rebuilt.push('#');
+                    rebuilt.push_str(new);
+                    changed = true;
+                    i = j;
+                    continue;
+                }
+            }
+            rebuilt.push(chars[i]);
+            i += 1;
+        }
+        text = rebuilt;
+    }
+    (text, changed)
+}
+
 /// Write `bytes` to `path` atomically: `<name>.tmp` in the same folder,
 /// then rename over the target (rename replaces on Windows).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1162,6 +1245,25 @@ mod tests {
             t0.elapsed().as_secs_f64() * 1000.0 / 10.0
         );
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_rename_tag_merges() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000001", "One\nTag: js, Web").unwrap();
+        store.save("20260101000002", "Two #js note\nTag: Javascript").unwrap();
+        store.save("20260101000003", "Three\nTag: js, Javascript").unwrap();
+        let changed = store.rename_tag("js", "Javascript").unwrap();
+        assert_eq!(changed, 3);
+        assert_eq!(store.read("20260101000001").unwrap(), "One\nTag: Javascript, Web");
+        assert!(store.read("20260101000002").unwrap().contains("#Javascript"));
+        // The merged note keeps one Javascript entry, not two.
+        assert_eq!(store.read("20260101000003").unwrap(), "Three\nTag: Javascript");
+        assert_eq!(store.notes_with_tag("Javascript").unwrap().len(), 3);
+        assert!(store.notes_with_tag("js").unwrap().is_empty());
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

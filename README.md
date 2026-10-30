@@ -13,6 +13,7 @@ note is saved, tagged, and indexed.
 | Ctrl+N | Save and start a new note |
 | Ctrl+O | Browse tags and notes (again to return to the editor) |
 | Ctrl+T | Suggest tags for the open note (click a chip to apply) |
+| Ctrl+G | Open the graph (Local around the open note, else Global) |
 | Ctrl+Shift+T | Sweep the inbox with the auto-tagger (on the tag list) |
 | Esc | Go back one screen |
 | ↑ / ↓ | Move the selection in the browser (while the search box is focused) |
@@ -51,6 +52,21 @@ name appears in the note gets a boost. The more you tag, the better it gets.
 Type `[[` in the editor and matching note titles appear above the footer;
 click one to insert `[[<id>|<title>]]`. Links are indexed, and an open note's
 footer shows its backlink count — click it to list the notes that link to it.
+
+## Graph
+
+**Ctrl+G** opens a force-directed graph of your notes (Obsidian-style):
+note circles coloured by first tag, tag squares, deterministic Barnes-Hut
+layout on a background thread.
+
+- **Tab** switches Local (around the open note) <-> Global; **T** toggles
+  tag nodes, **O** toggles orphan notes, **1/2/3** set the local depth,
+  **Ctrl+Enter** enlarges/restores the window.
+- Drag nodes (the layout reheats), drag the background to pan, scroll to
+  zoom, hover highlights a node, a click centers it, a double-click opens
+  it. The search box dims non-matching notes.
+- Global positions persist in `<vault>/.lazykasten/graph_layout.bin`, so
+  reopening the global graph does not restart the simulation.
 
 ## Themes
 

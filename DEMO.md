@@ -35,10 +35,13 @@ exits quietly (single instance).
    in the footer list to insert `[[<id>|<title>]]`, save, then open the
    target note: its footer shows "1 backlinks" — click it to list the
    linking notes.
-8. **Theme flip (10s).** Press **Ctrl+Shift+P** and arrow through five
+8. **Graph (10s).** Press **Ctrl+G**: the vault as a force-directed
+   graph, notes coloured by tag. Drag a node, scroll to zoom, double-click
+   a note to open it. Tab flips between Local and Global.
+9. **Theme flip (10s).** Press **Ctrl+Shift+P** and arrow through five
    themes, each previews live in one frame. Press Enter to keep one
    (it survives restarts), or Esc to revert.
-9. **Numbers (10s).** Run in a terminal:
+10. **Numbers (10s).** Run in a terminal:
    - `lazykasten.exe --eval-tags` — leave-one-out accuracy: on the demo
      vault, precision 1.000, recall 1.000, 0.82 ms per note. Thresholds:
      apply at confidence ≥ 0.4, suggest at ≥ 0.1, +0.5 when a tag's name
@@ -49,7 +52,8 @@ exits quietly (single instance).
      1.54s -> 0.85s, no-change re-check 0.385s -> 0.025s, tag index
      (400 notes) 1.36ms -> 0.53ms, auto-tag 8.8 -> 6.7 ms/note, search
      ~15 ms but now in the background. Theme switch ~0.1ms. Full table
-     in PERF.md.
+     in PERF.md. Graph at 20k notes: data load
+     57 ms, one layout step 26 ms (cached once settled).
 
 ## Fallbacks
 

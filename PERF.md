@@ -57,3 +57,24 @@ Notes:
 | Hotkey placement/`ShowWindow` moved outside `window.update` | Fixes the cross-monitor first-show GPUI re-entrancy panic found in M12; first show stays ~15ms, so no hidden warm-up frame was added. |
 | `render` no longer touches the store (`heading_text` uses a cached note count) | Rendering is pure over view state. |
 | Build profile trial: fat LTO + panic abort + strip | No measurable gain (index 0.874s vs 0.888s, auto-tag slower, exe same size). Reverted to thin LTO. mimalloc skipped: nothing measured was allocator-bound. |
+
+## Felt latency and graph (milestones 18-19)
+
+From `LAZYKASTEN_TRACE=1` on the real app (`on_next_frame` traces measure
+to the next painted frame; keystroke timings include GPUI's own editor
+work): keystroke to frame 2.3-7.7ms after typing in a 5,000-word note,
+browse to frame 2.3ms, hotkey first frame 27.3ms, theme switch ~0.04ms,
+auto-tag suggest ~6.5ms/note. Every screen switch and search now runs in
+the background with generation-tagged results.
+
+| Graph at 20,000 notes / 26,662 edges | Final |
+|---|---|
+| Data load (3 queries) | 57ms |
+| Barnes-Hut layout step | 25.7ms |
+
+The layout step is over a 16ms budget at 20,000 simultaneously linked
+notes, so the simulation advances at roughly 30 steps/second while
+settling at that extreme scale (rendering stays view-culled and input
+responsive); global positions are cached to `graph_layout.bin`, so a
+settled 20k graph reopens without re-simulating. At demo-vault scale
+(hundreds of notes) it settles in about a second at 60fps.

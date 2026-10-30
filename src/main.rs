@@ -44,6 +44,7 @@ enum Command {
     Quit,
     Warm,
     WarmHide,
+    ToggleAutostart,
     FilesChanged(Vec<std::path::PathBuf>),
 }
 
@@ -59,8 +60,123 @@ fn hwnd_of(window: &Window) -> HWND {
 /// Center a 760x540 logical-pixel window on the monitor under the cursor,
 /// corrected for that monitor's DPI. Done with raw Win32 because hidden
 /// GPUI windows ignore `window_bounds` (see HACKATHON_PROMPT pitfalls).
-fn place_on_cursor_monitor(hwnd: HWND) {
+/// Parse a settings `window` value ("x,y,w,h", physical pixels).
+fn parse_window_rect(s: &str) -> Option<(i32, i32, i32, i32)> {
+    let parts: Vec<i32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+    if parts.len() == 4 && parts[2] > 100 && parts[3] > 100 {
+        Some((parts[0], parts[1], parts[2], parts[3]))
+    } else {
+        None
+    }
+}
+
+fn window_rect_string(hwnd: HWND) -> Option<String> {
     unsafe {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_ok() && rc.right > rc.left {
+            return Some(format!(
+                "{},{},{},{}",
+                rc.left,
+                rc.top,
+                rc.right - rc.left,
+                rc.bottom - rc.top
+            ));
+        }
+    }
+    None
+}
+
+/// Parse "alt+j" / "ctrl+shift+k" into a global hotkey.
+fn parse_hotkey(s: &str) -> Option<HotKey> {
+    let mut mods = Modifiers::empty();
+    let mut key_code = None;
+    for part in s.split('+') {
+        match part.trim().to_lowercase().as_str() {
+            "alt" => mods |= Modifiers::ALT,
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "shift" => mods |= Modifiers::SHIFT,
+            "super" | "win" => mods |= Modifiers::META,
+            key => {
+                let code = match key {
+                    "a" => Code::KeyA, "b" => Code::KeyB, "c" => Code::KeyC, "d" => Code::KeyD,
+                    "e" => Code::KeyE, "f" => Code::KeyF, "g" => Code::KeyG, "h" => Code::KeyH,
+                    "i" => Code::KeyI, "j" => Code::KeyJ, "k" => Code::KeyK, "l" => Code::KeyL,
+                    "m" => Code::KeyM, "n" => Code::KeyN, "o" => Code::KeyO, "p" => Code::KeyP,
+                    "q" => Code::KeyQ, "r" => Code::KeyR, "s" => Code::KeyS, "t" => Code::KeyT,
+                    "u" => Code::KeyU, "v" => Code::KeyV, "w" => Code::KeyW, "x" => Code::KeyX,
+                    "y" => Code::KeyY, "z" => Code::KeyZ,
+                    "0" => Code::Digit0, "1" => Code::Digit1, "2" => Code::Digit2,
+                    "3" => Code::Digit3, "4" => Code::Digit4, "5" => Code::Digit5,
+                    "6" => Code::Digit6, "7" => Code::Digit7, "8" => Code::Digit8,
+                    "9" => Code::Digit9,
+                    "f1" => Code::F1, "f2" => Code::F2, "f3" => Code::F3, "f4" => Code::F4,
+                    "f5" => Code::F5, "f6" => Code::F6, "f7" => Code::F7, "f8" => Code::F8,
+                    "f9" => Code::F9, "f10" => Code::F10, "f11" => Code::F11, "f12" => Code::F12,
+                    _ => return None,
+                };
+                key_code = Some(code);
+            }
+        }
+    }
+    key_code.map(|code| HotKey::new(if mods.is_empty() { None } else { Some(mods) }, code))
+}
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Whether "Start with Windows" is currently registered.
+fn autostart_enabled() -> bool {
+    unsafe {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegCloseKey, RegOpenKeyExW, RegQueryValueExW, KEY_READ};
+        use windows::core::PCWSTR;
+        let mut key = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wide(RUN_KEY).as_ptr()), Some(0), KEY_READ, &mut key).is_err() {
+            return false;
+        }
+        let name = wide("Lazykasten");
+        let found = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, None, None).is_ok();
+        let _ = RegCloseKey(key);
+        found
+    }
+}
+
+/// Write or remove the Run entry for "Start with Windows".
+fn set_autostart(enabled: bool) {
+    unsafe {
+        use windows::Win32::System::Registry::{
+            HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+            RegSetValueExW,
+        };
+        use windows::core::PCWSTR;
+        let mut key = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wide(RUN_KEY).as_ptr()), Some(0), KEY_SET_VALUE, &mut key).is_err() {
+            return;
+        }
+        let name = wide("Lazykasten");
+        if enabled {
+            if let Ok(exe) = std::env::current_exe() {
+                let value = wide(&format!("\"{}\" --hidden", exe.display()));
+                let bytes: &[u8] = std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2);
+                let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+            }
+        } else {
+            let _ = RegDeleteValueW(key, PCWSTR(name.as_ptr()));
+        }
+        let _ = RegCloseKey(key);
+    }
+}
+
+fn place_on_cursor_monitor(hwnd: HWND, saved: Option<(i32, i32, i32, i32)>) {
+    unsafe {
+        if let Some((x, y, w, h)) = saved {
+            let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
         let mut pt = POINT::default();
         if GetCursorPos(&mut pt).is_err() {
             return;
@@ -143,7 +259,17 @@ fn main() {
         }
     };
 
-    let root = store::default_root();
+    // The settings file in the default vault may point at another vault.
+    let mut root = store::default_root();
+    let mut settings = themes::read_settings(&root.join(".lazykasten"));
+    if let Some(v) = settings.get("vault") {
+        if !v.trim().is_empty() {
+            root = std::path::PathBuf::from(v);
+            settings = themes::read_settings(&root.join(".lazykasten"));
+        }
+    }
+    let hotkey_setting = settings.get("hotkey").cloned();
+    let saved_window_setting = settings.get("window").cloned();
     trace::init(&root);
     let store = match Store::open(&root) {
         Ok(s) => Arc::new(s),
@@ -202,10 +328,25 @@ fn main() {
                 return;
             }
         };
-        if let Err(e) = manager.register(HotKey::new(Some(Modifiers::ALT), Code::KeyJ)) {
-            eprintln!("lazykasten: could not register Alt+J (another instance?): {e}");
-            cx.quit();
-            return;
+        // Hotkey from settings (`hotkey = "alt+j"`), falling back to
+        // Alt+J when the configured one cannot be registered.
+        let mut hotkey_status: Option<String> = None;
+        let configured = hotkey_setting
+            .as_deref()
+            .and_then(parse_hotkey)
+            .unwrap_or_else(|| HotKey::new(Some(Modifiers::ALT), Code::KeyJ));
+        if manager.register(configured).is_err() {
+            let fallback = HotKey::new(Some(Modifiers::ALT), Code::KeyJ);
+            if configured != fallback && manager.register(fallback).is_ok() {
+                hotkey_status = Some(format!(
+                    "Could not register {}; using Alt+J",
+                    hotkey_setting.as_deref().unwrap_or("hotkey")
+                ));
+            } else {
+                eprintln!("lazykasten: could not register the global hotkey (another instance?)");
+                cx.quit();
+                return;
+            }
         }
         let tx_hotkey = tx.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
@@ -217,12 +358,19 @@ fn main() {
 
         // Tray icon and menu.
         let open_item = MenuItem::new("Open note\tAlt+J", true, None);
+        let autostart_item = tray_icon::menu::CheckMenuItem::new(
+            "Start with Windows",
+            true,
+            autostart_enabled(),
+            None,
+        );
         let quit_item = MenuItem::new("Quit Lazykasten", true, None);
         let open_id = open_item.id().clone();
+        let autostart_id = autostart_item.id().clone();
         let quit_id = quit_item.id().clone();
         let menu = Menu::new();
         {
-            if menu.append_items(&[&open_item, &quit_item]).is_ok() {
+            if menu.append_items(&[&open_item, &autostart_item, &quit_item]).is_ok() {
                 if let Ok(icon) = Icon::from_rgba(tray_rgba(), 32, 32) {
                     let built = TrayIconBuilder::new()
                         .with_icon(icon)
@@ -243,6 +391,8 @@ fn main() {
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             if e.id == open_id {
                 let _ = tx_menu.try_send(Command::Show);
+            } else if e.id == autostart_id {
+                let _ = tx_menu.try_send(Command::ToggleAutostart);
             } else if e.id == quit_id {
                 let _ = tx_menu.try_send(Command::Quit);
             }
@@ -296,6 +446,9 @@ fn main() {
                 return;
             }
         };
+        if let Some(msg) = hotkey_status.take() {
+            let _ = view.update(cx, |v, cx| v.set_initial_status(msg, cx));
+        }
         trace::log("startup_ready", app_started.elapsed());
 
         // Warm first-frame costs while still hidden: shape the strings
@@ -357,6 +510,8 @@ fn main() {
         // cross-monitor SetWindowPos re-enters GPUI's move handler, which
         // panics on the already-borrowed App if called inside the update.
         let placed = Rc::new(Cell::new(start_hidden));
+        let saved_rect = saved_window_setting.as_deref().and_then(parse_window_rect);
+        let settings_dir = theme_data_dir.clone();
         let quit_store = store.clone();
         // Live file watching: notify on notes/, debounced 300ms in a
         // blocking thread (0% idle CPU), re-indexed in the background.
@@ -400,6 +555,7 @@ fn main() {
             // Keep the watcher alive for the app's whole life: locals
             // of the startup closure drop when it returns.
             let _watcher_keep = _watcher;
+            let autostart_item = autostart_item;
             while let Ok(cmd) = rx.recv().await {
                 let view = view.clone();
                 let placed = placed.clone();
@@ -407,13 +563,18 @@ fn main() {
                 let hwnd = hwnd_cell.get();
                 let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
                 match cmd {
+                    Command::ToggleAutostart => {
+                        let enable = !autostart_enabled();
+                        set_autostart(enable);
+                        autostart_item.set_checked(enable);
+                    }
                     Command::FilesChanged(paths) => {
                         let _ = any_window.update(cx, |_, window, cx| {
                             view.update(cx, |v, cx| v.on_external_files(paths, window, cx));
                         });
                     }
                     Command::Warm => {
-                        place_on_cursor_monitor(hwnd);
+                        place_on_cursor_monitor(hwnd, saved_rect);
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                         }
@@ -435,6 +596,15 @@ fn main() {
                         let _ = any_window.update(cx, |_, window, cx| {
                             view.update(cx, |v, cx| v.commit(window, cx));
                         });
+                        // Remember the window's size and position.
+                        if let Some(rect) = window_rect_string(hwnd) {
+                            let dir = settings_dir.clone();
+                            std::thread::spawn(move || {
+                                let mut map = themes::read_settings(&dir);
+                                map.insert("window".to_string(), rect);
+                                themes::write_settings(&dir, &map);
+                            });
+                        }
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
@@ -450,7 +620,7 @@ fn main() {
                             let t0 = std::time::Instant::now();
                             let first = adopt || !placed.get();
                             if first {
-                                place_on_cursor_monitor(hwnd);
+                                place_on_cursor_monitor(hwnd, saved_rect);
                                 placed.set(true);
                             }
                             show_and_focus(hwnd);

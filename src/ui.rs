@@ -741,6 +741,13 @@ impl LazyKasten {
         .detach();
     }
 
+    /// One-shot status from the app shell (e.g. a hotkey fallback).
+    pub fn set_initial_status(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.status = msg.into();
+        self.keep_status = true;
+        cx.notify();
+    }
+
     pub fn save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value();
         // Never rewrite an unchanged note (would bump its mtime for nothing).

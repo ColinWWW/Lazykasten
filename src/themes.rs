@@ -43,20 +43,45 @@ pub fn embedded_json(name: &str) -> Option<&'static str> {
     BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, j)| *j)
 }
 
-/// Parse the one-key settings file by hand (`theme = "Name"`).
-pub fn parse_settings(text: &str) -> Option<String> {
+/// Parse the settings file by hand (`key = "value"` per line).
+pub fn settings_map(text: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
     for line in text.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("theme") {
-            if let Some(value) = rest.trim_start().strip_prefix('=') {
-                let value = value.trim().trim_matches('"');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                out.insert(key.trim().to_string(), value.to_string());
             }
         }
     }
-    None
+    out
+}
+
+pub fn read_settings(data_dir: &Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(data_dir.join("settings.toml"))
+        .map(|text| settings_map(&text))
+        .unwrap_or_default()
+}
+
+/// Write the whole settings map back, atomically, keys sorted.
+pub fn write_settings(data_dir: &Path, map: &std::collections::HashMap<String, String>) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let mut text = String::new();
+    for k in keys {
+        text.push_str(&format!("{k} = \"{}\"\n", map[k]));
+    }
+    let _ = crate::store::atomic_write(&data_dir.join("settings.toml"), text.as_bytes());
+}
+
+/// Parse the one-key settings file by hand (`theme = "Name"`).
+pub fn parse_settings(text: &str) -> Option<String> {
+    settings_map(text).get("theme").cloned()
 }
 
 pub fn saved_theme_name(data_dir: &Path) -> String {
@@ -67,11 +92,9 @@ pub fn saved_theme_name(data_dir: &Path) -> String {
 }
 
 pub fn write_saved_theme(data_dir: &Path, name: &str) {
-    let _ = std::fs::create_dir_all(data_dir);
-    let _ = crate::store::atomic_write(
-        &data_dir.join("settings.toml"),
-        format!("theme = \"{name}\"\n").as_bytes(),
-    );
+    let mut map = read_settings(data_dir);
+    map.insert("theme".to_string(), name.to_string());
+    write_settings(data_dir, &map);
 }
 
 /// Register a theme JSON with the registry (already-registered names are

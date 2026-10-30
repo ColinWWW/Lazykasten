@@ -542,6 +542,60 @@ impl Store {
         Ok(out)
     }
 
+    /// All notes for the graph: `(rowid, id, title, first tag by name)`.
+    pub fn graph_notes(&self) -> Result<Vec<(i64, String, String, Option<String>)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare_cached(
+            "SELECT n.rowid, n.id, n.title,
+                    (SELECT t.name FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
+                     WHERE nt.note_id = n.id ORDER BY t.name COLLATE NOCASE LIMIT 1)
+             FROM notes n ORDER BY n.rowid",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Link edges as rowid pairs (both endpoints must be indexed notes).
+    pub fn graph_links(&self) -> Result<Vec<(i64, i64)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare_cached(
+            "SELECT nf.rowid, nt.rowid FROM links l
+             JOIN notes nf ON nf.id = l.from_id JOIN notes nt ON nt.id = l.to_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// `(tag, note rowids)` groups, tags ordered by name.
+    pub fn graph_tag_notes(&self) -> Result<Vec<(String, Vec<i64>)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare_cached(
+            "SELECT t.name, n.rowid FROM tags t
+             JOIN note_tags nt ON nt.tag_id = t.id JOIN notes n ON n.id = nt.note_id
+             ORDER BY t.name COLLATE NOCASE, n.rowid",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out: Vec<(String, Vec<i64>)> = Vec::new();
+        for row in rows {
+            let (tag, rowid) = row?;
+            match out.last_mut() {
+                Some((t, ids)) if *t == tag => ids.push(rowid),
+                _ => out.push((tag, vec![rowid])),
+            }
+        }
+        Ok(out)
+    }
+
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<NoteSummary>> {
         let t0 = std::time::Instant::now();
         let r = self.search_impl(query, limit);
@@ -815,9 +869,18 @@ mod tests {
         let n = 20_000;
         for i in 0..n {
             let id = format!("{:014}", 20260101000000u64 + i as u64);
+            // 1-3 deterministic links per note (every third note also
+            // links forward), so the graph bench sees a realistic web.
+            let mut body = format!("Note title {i}\nBody text for note {i} with searchable words.");
+            if i > 0 {
+                body.push_str(&format!("\nSee [[{:014}]]", 20260101000000u64 + (i / 2) as u64));
+                if i % 3 == 0 && i + 7 < n {
+                    body.push_str(&format!(" and [[{:014}]]", 20260101000000u64 + (i + 7) as u64));
+                }
+            }
             std::fs::write(
                 store.note_path(&id),
-                format!("Note title {i}\nBody text for note {i} with searchable words.\nTag: tag{}, common", i % 50),
+                format!("{body}\nTag: tag{}, common", i % 50),
             )
             .unwrap();
         }
@@ -876,6 +939,21 @@ mod tests {
         println!("search 2-letter (se): {search2_ms:.3}ms ({} hits)", hits2.len());
         println!("startup re-check (no changes): {recheck_secs:.3}s");
         println!("auto-tag suggest: {autotag_ms:.3}ms per note");
+
+        let t0 = Instant::now();
+        let gdata = crate::graph::build(&store, crate::graph::GraphMode::Global, None, 2, false, false).unwrap();
+        let graph_load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let mut glayout = crate::graph::Layout::new(&gdata, &std::collections::HashMap::new());
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            glayout.step(&gdata, &std::collections::HashSet::new());
+        }
+        let graph_step_ms = t0.elapsed().as_secs_f64() * 1000.0 / 5.0;
+        println!(
+            "graph: {} nodes, {} edges, data load {graph_load_ms:.3}ms, layout step {graph_step_ms:.3}ms",
+            gdata.nodes.len(),
+            gdata.edges.len()
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(&root);

@@ -11,6 +11,7 @@ pub(super) struct GraphViewport {
     centered: bool,
     center_on: Option<usize>,
     hover: Option<usize>,
+    zoom_target: f32,
     pub(super) query: Option<std::collections::HashSet<String>>,
     bounds_origin: [f32; 2],
 }
@@ -19,24 +20,18 @@ pub(super) struct GraphPaint {
     nodes: Vec<(usize, [f32; 2], bool, bool)>,
     edges: Vec<([f32; 2], [f32; 2])>,
     labels: Vec<(usize, [f32; 2])>,
+    /// Hover focus: neighbours of the hovered node (others dim).
+    focus: Option<std::collections::HashSet<usize>>,
 }
-/// Node colour: the theme blue hue-rotated by the first tag, so colour
-/// comes from the theme and grouping stays visible across theme changes.
+/// Node colour: the shared per-tag colour (`style::tag_color`, the
+/// same one the editor chips use), so a tag looks identical everywhere.
 pub(super) fn graph_node_color(colors: &RowColors, node: &crate::graph::GNode) -> Hsla {
     if node.is_tag {
         return colors.muted_foreground;
     }
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in node.first_tag.as_deref().unwrap_or("").as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    let base = colors.blue;
-    Hsla {
-        h: (base.h + (h % 6) as f32 * 0.09).fract(),
-        s: base.s,
-        l: base.l,
-        a: base.a,
+    match &node.first_tag {
+        Some(tag) => style::tag_color(tag, colors.background),
+        None => colors.blue,
     }
 }
 pub(super) struct GraphView {
@@ -109,7 +104,7 @@ impl LazyKasten {
                         .g_center
                         .as_ref()
                         .and_then(|id| data.by_id.get(id).copied());
-                    let mut vp = GraphViewport { zoom: 1.0, ..Default::default() };
+                    let mut vp = GraphViewport { zoom: 1.0, zoom_target: 1.0, ..Default::default() };
                     vp.center_on = center_idx.or(if data.nodes.is_empty() { None } else { Some(0) });
                     this.graph = Some(GraphView {
                         data: std::sync::Arc::new(data),
@@ -266,10 +261,12 @@ impl LazyKasten {
                 }
             }
             'e' => {
-                g.vp.borrow_mut().zoom = (g.vp.borrow().zoom * 1.15).min(4.0);
+                let mut vp = g.vp.borrow_mut();
+                vp.zoom_target = (vp.zoom_target * 1.15).min(3.0);
             }
             'E' => {
-                g.vp.borrow_mut().zoom = (g.vp.borrow().zoom / 1.15).max(0.05);
+                let mut vp = g.vp.borrow_mut();
+                vp.zoom_target = (vp.zoom_target / 1.15).max(0.15);
             }
             'i' => {
                 // Open the note node nearest the canvas centre.
@@ -424,10 +421,15 @@ impl LazyKasten {
         let delta = ev.delta.pixel_delta(px(16.0));
         if let Some(g) = &self.graph {
             let mut vp = g.vp.borrow_mut();
-            let world = [(local[0] - vp.cam[0]) / vp.zoom, (local[1] - vp.cam[1]) / vp.zoom];
+            // Smooth zoom: the wheel moves the target; frames lerp to it
+            // (instant when LAZYKASTEN_REDUCED_MOTION=1).
             let factor = (1.0 - f32::from(delta.y) / 300.0).clamp(0.7, 1.4);
-            vp.zoom = (vp.zoom * factor).clamp(0.15, 3.0);
-            vp.cam = [local[0] - world[0] * vp.zoom, local[1] - world[1] * vp.zoom];
+            vp.zoom_target = (vp.zoom_target * factor).clamp(0.15, 3.0);
+            if std::env::var_os("LAZYKASTEN_REDUCED_MOTION").is_some() {
+                let world = [(local[0] - vp.cam[0]) / vp.zoom, (local[1] - vp.cam[1]) / vp.zoom];
+                vp.zoom = vp.zoom_target;
+                vp.cam = [local[0] - world[0] * vp.zoom, local[1] - world[1] * vp.zoom];
+            }
         }
         cx.notify();
     }
@@ -483,7 +485,11 @@ impl LazyKasten {
     pub(super) fn render_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = row_colors(cx);
         if let Some(g) = &self.graph {
-            if !g.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            let zooming = {
+                let v = g.vp.borrow();
+                (v.zoom_target - v.zoom).abs() > 0.001
+            };
+            if !g.settled.load(std::sync::atomic::Ordering::SeqCst) || zooming {
                 window.request_animation_frame();
             }
         }
@@ -505,6 +511,45 @@ impl LazyKasten {
         } else {
             "No graph".to_string()
         };
+
+        // Legend: the six biggest first-tags with their shared colours.
+        let legend: Option<AnyElement> = self.graph.as_ref().map(|g| {
+            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for n in &g.data.nodes {
+                if let Some(t) = &n.first_tag {
+                    *counts.entry(t.as_str()).or_default() += 1;
+                }
+            }
+            let mut top: Vec<(&str, usize)> = counts.into_iter().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            top.truncate(6);
+            let mut el = div()
+                .absolute()
+                .left(px(12.0))
+                .bottom(px(12.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px(px(style::tokens::SPACE_2))
+                .py(px(style::tokens::SPACE_2))
+                .rounded(px(style::tokens::RADIUS_CARD))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.background)
+                .text_size(px(style::tokens::FONT_MUTED));
+            for (tag, n) in top {
+                let c = style::tag_color(tag, colors.background);
+                el = el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(10.0)).h(px(10.0)).rounded_full().bg(c))
+                        .child(div().text_color(colors.muted_foreground).child(format!("#{tag} ({n})"))),
+                );
+            }
+            el.into_any_element()
+        });
 
         let canvas_el: AnyElement = if let Some(g) = &self.graph {
             let data = g.data.clone();
@@ -535,6 +580,17 @@ impl LazyKasten {
                                 ];
                             }
                         }
+                        // Smooth-zoom step: lerp toward the target,
+                        // keeping the canvas-centre world point fixed.
+                        if (v.zoom_target - v.zoom).abs() > 0.001 {
+                            let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                            let world_c = [(bw / 2.0 - v.cam[0]) / v.zoom, (bh / 2.0 - v.cam[1]) / v.zoom];
+                            v.zoom += (v.zoom_target - v.zoom) * 0.3;
+                            if (v.zoom_target - v.zoom).abs() <= 0.002 {
+                                v.zoom = v.zoom_target;
+                            }
+                            v.cam = [bw / 2.0 - world_c[0] * v.zoom, bh / 2.0 - world_c[1] * v.zoom];
+                        }
                         let (cam, zoom) = (v.cam, v.zoom);
                         drop(v);
                         let to_screen = |p: [f32; 2]| -> [f32; 2] {
@@ -561,6 +617,19 @@ impl LazyKasten {
                                     paint.edges.push((sa, sb));
                                 }
                             }
+                        }
+                        // Hover focus set: hovered node + its neighbours.
+                        if let Some(h) = hover {
+                            let mut set = std::collections::HashSet::new();
+                            set.insert(h);
+                            for (a, b) in &data.edges {
+                                if *a as usize == h {
+                                    set.insert(*b as usize);
+                                } else if *b as usize == h {
+                                    set.insert(*a as usize);
+                                }
+                            }
+                            paint.focus = Some(set);
                         }
                         // Labels: all when zoomed in, else the 150
                         // highest-degree visible nodes (plus the hover).
@@ -607,6 +676,11 @@ impl LazyKasten {
                             let mut color = graph_node_color(&colors, node);
                             if *dim {
                                 color.a *= 0.15;
+                            }
+                            if let Some(focus) = &paint.focus {
+                                if !focus.contains(i) {
+                                    color.a *= 0.25;
+                                }
                             }
                             let rect = Bounds::new(
                                 point(px(s[0] - r), px(s[1] - r)),
@@ -694,6 +768,7 @@ impl LazyKasten {
             .child(
                 div()
                     .flex_1()
+                    .relative()
                     .track_focus(&self.graph_focus)
                     .key_context("GraphView")
                     .capture_key_down(cx.listener(Self::on_graph_vim_key))
@@ -701,7 +776,8 @@ impl LazyKasten {
                     .on_mouse_move(cx.listener(Self::graph_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::graph_mouse_up))
                     .on_scroll(cx.listener(Self::graph_wheel))
-                    .child(canvas_el),
+                    .child(canvas_el)
+                    .children(legend),
             )
             .child(
                 div()

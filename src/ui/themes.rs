@@ -7,6 +7,8 @@ impl LazyKasten {
     /// first open; moving the selection previews live, Enter keeps and
     /// saves, Esc reverts to `theme_original`.
     pub fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The picker is typing-first even with Vim on.
+        self.list_insert = true;
         if !self.themes_loaded {
             let (entries, invalid) = crate::themes::load_picker_themes(cx, &self.store.data_dir());
             self.theme_entries = entries;

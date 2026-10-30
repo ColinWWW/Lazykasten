@@ -73,6 +73,19 @@ pub const KEY_HELP: &[(&str, &str, &str)] = &[
     ("Graph", "Ctrl+Enter", "Enlarge / restore the window"),
     ("Graph", "Click", "Open the note (drag moves it instead)"),
     ("Graph", "Esc", "Back (from search: back to the canvas)"),
+    ("Vim editor", "i a I A o O", "Enter Insert mode"),
+    ("Vim editor", "Esc / Ctrl+[", "Back to Normal mode"),
+    ("Vim editor", "hjkl, w b e, 0 ^ $", "Move (counts work: 3w, d2j)"),
+    ("Vim editor", "d c y + motion", "Delete / change / yank (dd, ciw, y$)"),
+    ("Vim editor", "x X r ~ J", "Delete char, replace, toggle case, join"),
+    ("Vim editor", "p P, u, Ctrl+R", "Paste, undo, redo"),
+    ("Vim editor", "v V, .", "Visual mode, repeat last change"),
+    ("Vim editor", "/ ? n N * #", "Search (smartcase)"),
+    ("Vim editor", ":w :q :wq :q!", "Save, hide, save+hide, discard+hide"),
+    ("Vim editor", "f t ; , % gg G", "Find char, repeat, brackets, file ends"),
+    ("Vim lists", "j k gg G, Ctrl+D/U", "Navigate lists (with Vim on)"),
+    ("Vim lists", "/ i a, Esc, q", "Type in search, back to list, leave"),
+    ("Vim graph", "hjkl, e E, i, q", "Pan, zoom, open centre note, leave"),
     ("Themes", "Up / Down", "Preview the theme live"),
     ("Themes", "Enter", "Keep and save the theme"),
     ("Themes", "Esc", "Revert to the previous theme"),
@@ -128,6 +141,7 @@ pub fn bind_keys(cx: &mut App) {
 mod browser;
 mod editor;
 mod graph_view;
+mod listnav;
 mod switcher;
 mod themes;
 
@@ -235,6 +249,8 @@ pub struct LazyKasten {
     vim_entry_keys: Vec<crate::vim::Key>,
     vim_insert_start: Option<usize>,
     vim_discard: bool,
+    list_nav: listnav::ListNav,
+    list_insert: bool,
     pub hide_hook: Option<std::sync::mpsc::Sender<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -341,6 +357,8 @@ impl LazyKasten {
             vim_entry_keys: Vec::new(),
             vim_insert_start: None,
             vim_discard: false,
+            list_nav: listnav::ListNav::new(),
+            list_insert: false,
             hide_hook: None,
             _subscriptions: subscriptions,
         }

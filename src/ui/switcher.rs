@@ -25,6 +25,7 @@ impl LazyKasten {
             self.save(window, cx);
         }
         self.screen = Screen::Switcher;
+        self.list_insert = true;
         self.selected = 0;
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.search.update(cx, |s, cx| s.focus(window, cx));

@@ -243,6 +243,71 @@ impl LazyKasten {
         let vp = g.vp.borrow();
         [f32::from(ev_pos.x) - vp.bounds_origin[0], f32::from(ev_pos.y) - vp.bounds_origin[1]]
     }
+    /// Vim tokens on the graph canvas: hjkl pan, e/E zoom, i opens the
+    /// node nearest the centre, q leaves.
+    pub(super) fn on_graph_vim_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.vim_enabled || self.screen != Screen::Graph {
+            return;
+        }
+        if self.search.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let Some(kc) = &ev.keystroke.key_char else { return };
+        let Some(c) = kc.chars().next() else { return };
+        let Some(g) = &self.graph else { return };
+        match c {
+            'h' | 'j' | 'k' | 'l' => {
+                let mut vp = g.vp.borrow_mut();
+                match c {
+                    'h' => vp.cam[0] += 40.0,
+                    'l' => vp.cam[0] -= 40.0,
+                    'j' => vp.cam[1] -= 40.0,
+                    _ => vp.cam[1] += 40.0,
+                }
+            }
+            'e' => {
+                g.vp.borrow_mut().zoom = (g.vp.borrow().zoom * 1.15).min(4.0);
+            }
+            'E' => {
+                g.vp.borrow_mut().zoom = (g.vp.borrow().zoom / 1.15).max(0.05);
+            }
+            'i' => {
+                // Open the note node nearest the canvas centre.
+                let vp = g.vp.borrow();
+                let (w, h) = (
+                    f32::from(vp.bounds.size.width),
+                    f32::from(vp.bounds.size.height),
+                );
+                let center = [(w / 2.0 - vp.cam[0]) / vp.zoom, (h / 2.0 - vp.cam[1]) / vp.zoom];
+                drop(vp);
+                let pos = g.pos.lock().unwrap();
+                let mut best: Option<(usize, f32)> = None;
+                for (i, node) in g.data.nodes.iter().enumerate() {
+                    if node.is_tag {
+                        continue;
+                    }
+                    let d = (pos[i][0] - center[0]).powi(2) + (pos[i][1] - center[1]).powi(2);
+                    if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                        best = Some((i, d));
+                    }
+                }
+                drop(pos);
+                if let Some((i, _)) = best {
+                    let id = g.data.nodes[i].id.clone();
+                    self.stop_graph();
+                    self.return_to_graph = true;
+                    self.open_note(&id, window, cx);
+                }
+            }
+            'q' => {
+                self.leave_graph(window, cx);
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     pub(super) fn graph_mouse_down(&mut self, ev: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if ev.button != MouseButton::Left || self.graph.is_none() {
             return;
@@ -631,6 +696,7 @@ impl LazyKasten {
                     .flex_1()
                     .track_focus(&self.graph_focus)
                     .key_context("GraphView")
+                    .capture_key_down(cx.listener(Self::on_graph_vim_key))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::graph_mouse_down))
                     .on_mouse_move(cx.listener(Self::graph_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::graph_mouse_up))

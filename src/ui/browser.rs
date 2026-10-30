@@ -6,6 +6,90 @@ impl LazyKasten {
     /// Screen switches flip instantly and load their rows in the
     /// background; the previous rows stay until the new ones land, and a
     /// generation number drops stale arrivals.
+    /// With Vim on, list screens start in list-normal mode (the
+    /// container is focused, j/k work); `/` focuses the search box.
+    pub(super) fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_enabled {
+            self.list_insert = false;
+            self.graph_focus.focus(window, cx);
+        } else {
+            self.search.update(cx, |s, cx| s.focus(window, cx));
+        }
+    }
+
+    pub(super) fn on_list_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use super::listnav::Nav;
+        if !self.vim_enabled || self.screen == Screen::Editor || self.screen == Screen::Graph {
+            return;
+        }
+        if self.renaming.is_some() {
+            return;
+        }
+        let ks = &ev.keystroke;
+        if self.list_insert {
+            if ks.key == "escape" {
+                self.list_insert = false;
+                self.graph_focus.focus(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if ks.key == "enter" {
+            self.open_selected(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if ks.modifiers.alt {
+            return;
+        }
+        let (c, ctrl) = if ks.modifiers.control {
+            match ks.key.as_str() {
+                "d" => ('d', true),
+                "u" => ('u', true),
+                _ => return,
+            }
+        } else if let Some(kc) = &ks.key_char {
+            match kc.chars().next() {
+                Some(c) => (c, false),
+                None => return,
+            }
+        } else {
+            return;
+        };
+        match self.list_nav.key(c, ctrl) {
+            Nav::Move(d) => {
+                self.move_selection(d as i64, cx);
+            }
+            Nav::Top => {
+                self.selected = 0;
+                self.list_scroll.scroll_to_item(self.selected, ScrollStrategy::Top);
+                cx.notify();
+            }
+            Nav::Bottom => {
+                let len = self.list_len();
+                if len > 0 {
+                    self.selected = len - 1;
+                    self.list_scroll.scroll_to_item(self.selected, ScrollStrategy::Bottom);
+                    cx.notify();
+                }
+            }
+            Nav::Page(d) => {
+                self.move_selection((d * 10) as i64, cx);
+            }
+            Nav::Search => {
+                self.list_insert = true;
+                self.search.update(cx, |s, cx| s.focus(window, cx));
+                cx.notify();
+            }
+            Nav::Back => {
+                self.go_back(window, cx);
+            }
+            Nav::None => return,
+        }
+        cx.stop_propagation();
+    }
+
     pub fn show_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.screen_gen += 1;
         let seq = self.screen_gen;
@@ -13,7 +97,7 @@ impl LazyKasten {
         self.selected = 0;
         self.search
             .update(cx, |s, cx| s.set_value("", window, cx));
-        self.search.update(cx, |s, cx| s.focus(window, cx));
+        self.focus_list(window, cx);
         cx.notify();
         let store = self.store.clone();
         let task = cx.background_spawn(async move {
@@ -41,7 +125,7 @@ impl LazyKasten {
         let seq = self.screen_gen;
         self.screen = Screen::Trash;
         self.selected = 0;
-        self.search.update(cx, |s, cx| s.focus(window, cx));
+        self.focus_list(window, cx);
         cx.notify();
         let store = self.store.clone();
         let task = cx.background_spawn(async move { store.trashed_notes().unwrap_or_default() });
@@ -62,7 +146,7 @@ impl LazyKasten {
         let seq = self.screen_gen;
         self.screen = Screen::TagIndex(tag.to_string());
         self.selected = 0;
-        self.search.update(cx, |s, cx| s.focus(window, cx));
+        self.focus_list(window, cx);
         cx.notify();
         let store = self.store.clone();
         let tag = tag.to_string();
@@ -84,7 +168,7 @@ impl LazyKasten {
         let seq = self.screen_gen;
         self.screen = Screen::Backlinks(id.clone());
         self.selected = 0;
-        self.search.update(cx, |s, cx| s.focus(window, cx));
+        self.focus_list(window, cx);
         cx.notify();
         let store = self.store.clone();
         let task = cx.background_spawn(async move { store.backlinks(&id).unwrap_or_default() });
@@ -358,6 +442,9 @@ impl LazyKasten {
             .flex()
             .flex_col()
             .size_full()
+            .track_focus(&self.graph_focus)
+            .key_context(if self.vim_enabled && !self.list_insert { "ListNav" } else { "ListSearch" })
+            .capture_key_down(cx.listener(Self::on_list_key_down))
             .child(
                 div()
                     .key_context("TagSearch")

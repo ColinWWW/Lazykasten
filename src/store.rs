@@ -1067,6 +1067,21 @@ mod tests {
             gdata.edges.len()
         );
 
+        // Settle from scratch (coarse tag-cluster start, no cache).
+        let mut settle_layout = crate::graph::Layout::new(&gdata, &std::collections::HashMap::new());
+        let t0 = Instant::now();
+        let mut steps = 0usize;
+        for _ in 0..3000 {
+            steps += 1;
+            if settle_layout.step(&gdata, &std::collections::HashSet::new()) < 0.08 {
+                break;
+            }
+        }
+        println!(
+            "graph settle from scratch: {:.3}s in {steps} steps",
+            t0.elapsed().as_secs_f64()
+        );
+
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

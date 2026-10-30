@@ -234,6 +234,14 @@ fn hash_position(seed: &str) -> [f32; 2] {
 pub struct Layout {
     pub pos: Vec<[f32; 2]>,
     vel: Vec<[f32; 2]>,
+    still: Vec<u8>,
+    tick: u32,
+}
+
+/// Centre of a tag's coarse starting cluster.
+fn cluster_center(tag: &str) -> [f32; 2] {
+    let c = hash_position(&format!("cluster:{tag}"));
+    [c[0] * 3.0, c[1] * 3.0]
 }
 
 impl Layout {
@@ -243,40 +251,89 @@ impl Layout {
             .iter()
             .map(|n| {
                 if n.is_tag {
-                    hash_position(&format!("tag:{}", n.id))
+                    cluster_center(&n.id)
+                } else if let Some(p) = cache.get(&n.rowid) {
+                    *p
+                } else if let Some(tag) = &n.first_tag {
+                    // Coarse start: notes begin around their tag's
+                    // cluster centre, so the sim starts nearly settled.
+                    let c = cluster_center(tag);
+                    let h = hash_position(&n.id);
+                    [c[0] + h[0] * 0.3, c[1] + h[1] * 0.3]
                 } else {
-                    cache.get(&n.rowid).copied().unwrap_or_else(|| hash_position(&n.id))
+                    hash_position(&n.id)
                 }
             })
             .collect();
-        Layout { pos, vel: vec![[0.0, 0.0]; data.nodes.len()] }
+        let n = data.nodes.len();
+        Layout { pos, vel: vec![[0.0, 0.0]; n], still: vec![0; n], tick: 0 }
     }
 
     pub fn from_positions(data: &GraphData, pos: Vec<[f32; 2]>) -> Self {
         let n = data.nodes.len();
-        Layout { pos, vel: vec![[0.0, 0.0]; n] }
+        Layout { pos, vel: vec![[0.0, 0.0]; n], still: vec![0; n], tick: 0 }
     }
 
     /// One step; returns the largest movement (settle signal).
     pub fn step(&mut self, data: &GraphData, pinned: &HashSet<usize>) -> f32 {
-        let forces = compute_forces(data, &self.pos, true);
+        self.tick += 1;
+        // Cooling ramp: damping grows over the first ~400 steps so the
+        // layout anneals instead of oscillating around equilibrium.
+        let cool = (self.tick as f32 / 400.0).min(1.0);
+        let damp = 0.85 - 0.4 * cool;
+        let speed_cap = 12.0 - 9.0 * cool;
+        // Annealing heat: applied movement scales down geometrically,
+        // so the layout converges instead of jittering at equilibrium.
+        let heat = 0.99f32.powi(self.tick as i32).max(0.01);
+        // Nodes still for 10 steps sleep: their repulsion traversal and
+        // integration are skipped until a neighbour moves.
+        let asleep: Vec<bool> = self.still.iter().map(|s| *s >= 10).collect();
+        let forces = compute_forces_skip(data, &self.pos, true, &asleep);
         let mut max_move = 0.0f32;
+        let mut moved: Vec<usize> = Vec::new();
         for i in 0..self.pos.len() {
             if pinned.contains(&i) {
+                self.vel[i] = [0.0, 0.0];
+                self.still[i] = 0;
+                continue;
+            }
+            if asleep[i] {
                 self.vel[i] = [0.0, 0.0];
                 continue;
             }
             let v = &mut self.vel[i];
-            v[0] = (v[0] + forces[i][0]) * 0.85;
-            v[1] = (v[1] + forces[i][1]) * 0.85;
+            v[0] = (v[0] + forces[i][0]) * damp;
+            v[1] = (v[1] + forces[i][1]) * damp;
             let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
-            if speed > 12.0 {
-                v[0] *= 12.0 / speed;
-                v[1] *= 12.0 / speed;
+            if speed > speed_cap {
+                v[0] *= speed_cap / speed;
+                v[1] *= speed_cap / speed;
             }
-            self.pos[i][0] += v[0];
-            self.pos[i][1] += v[1];
-            max_move = max_move.max(speed.min(12.0));
+            self.pos[i][0] += v[0] * heat;
+            self.pos[i][1] += v[1] * heat;
+            let applied = speed.min(speed_cap) * heat;
+            max_move = max_move.max(applied);
+            if applied < 0.05 {
+                self.still[i] = self.still[i].saturating_add(1);
+            } else {
+                self.still[i] = 0;
+                if applied >= 0.5 {
+                    moved.push(i);
+                }
+            }
+        }
+        // Wake the neighbours of anything that really moved.
+        if !moved.is_empty() {
+            let moved_set: HashSet<usize> = moved.into_iter().collect();
+            for (a, b) in &data.edges {
+                let (a, b) = (*a as usize, *b as usize);
+                if moved_set.contains(&a) {
+                    self.still[b] = 0;
+                }
+                if moved_set.contains(&b) {
+                    self.still[a] = 0;
+                }
+            }
         }
         max_move
     }
@@ -285,10 +342,21 @@ impl Layout {
 const REPULSION: f32 = 900.0;
 const THETA: f32 = 0.8;
 
+/// Full force computation (kept for the Barnes-Hut accuracy test).
+#[allow(dead_code)]
 pub fn compute_forces(data: &GraphData, pos: &[[f32; 2]], barnes_hut: bool) -> Vec<[f32; 2]> {
+    compute_forces_skip(data, pos, barnes_hut, &[])
+}
+
+fn compute_forces_skip(
+    data: &GraphData,
+    pos: &[[f32; 2]],
+    barnes_hut: bool,
+    skip: &[bool],
+) -> Vec<[f32; 2]> {
     let mut forces = vec![[0.0f32; 2]; pos.len()];
     if barnes_hut {
-        repulsion_barnes_hut(pos, &mut forces);
+        repulsion_barnes_hut(pos, &mut forces, skip);
     } else {
         repulsion_brute(pos, &mut forces);
     }
@@ -336,7 +404,7 @@ struct TreeNode {
     point: i32,
 }
 
-fn repulsion_barnes_hut(pos: &[[f32; 2]], forces: &mut [[f32; 2]]) {
+fn repulsion_barnes_hut(pos: &[[f32; 2]], forces: &mut [[f32; 2]], skip: &[bool]) {
     if pos.is_empty() {
         return;
     }
@@ -360,18 +428,55 @@ fn repulsion_barnes_hut(pos: &[[f32; 2]], forces: &mut [[f32; 2]]) {
     for (i, p) in pos.iter().enumerate() {
         insert(&mut tree, 0, i, *p, pos, 0);
     }
-    for i in 0..pos.len() {
-        apply_repulsion(&tree, 0, i, pos[i], forces);
+    for n in tree.iter_mut() {
+        if n.mass > 0.0 {
+            n.com[0] /= n.mass;
+            n.com[1] /= n.mass;
+        }
+    }
+    // Each node's traversal is independent: split the force rows across
+    // all cores for large graphs (springs/updates stay sequential).
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    if pos.len() >= 1500 && threads > 1 {
+        // Many small chunks: dense regions traverse deeper, so fine
+        // chunks balance the load across cores.
+        let chunk = (pos.len() / (threads * 8)).max(64);
+        let tree_ref = &tree;
+        let pos_ref = pos;
+        std::thread::scope(|scope| {
+            for (ci, rows) in forces.chunks_mut(chunk).enumerate() {
+                let start = ci * chunk;
+                scope.spawn(move || {
+                    for (j, out) in rows.iter_mut().enumerate() {
+                        let i = start + j;
+                        if skip.get(i).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        apply_repulsion(tree_ref, 0, i, pos_ref[i], out);
+                    }
+                });
+            }
+        });
+    } else {
+        for i in 0..pos.len() {
+            if skip.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            apply_repulsion(&tree, 0, i, pos[i], &mut forces[i]);
+        }
     }
 }
 
 fn insert(tree: &mut Vec<TreeNode>, node: usize, point_idx: usize, p: [f32; 2], pos: &[[f32; 2]], depth: u32) {
-    // Accumulate mass/center of mass.
+    // Accumulate mass and the position sum; the centre of mass is
+    // finalised as sum/mass in one pass after all inserts.
     {
         let n = &mut tree[node];
-        let m = n.mass;
-        n.com[0] = (n.com[0] * m + p[0]) / (m + 1.0);
-        n.com[1] = (n.com[1] * m + p[1]) / (m + 1.0);
+        n.com[0] += p[0];
+        n.com[1] += p[1];
         n.mass += 1.0;
     }
     if depth > 24 || tree[node].size < 0.5 {
@@ -418,7 +523,7 @@ fn insert_into_child(tree: &mut Vec<TreeNode>, node: usize, point_idx: usize, p:
     }
 }
 
-fn apply_repulsion(tree: &[TreeNode], node: usize, self_idx: usize, p: [f32; 2], forces: &mut [[f32; 2]]) {
+fn apply_repulsion(tree: &[TreeNode], node: usize, self_idx: usize, p: [f32; 2], out: &mut [f32; 2]) {
     let n = &tree[node];
     if n.mass == 0.0 {
         return;
@@ -432,13 +537,13 @@ fn apply_repulsion(tree: &[TreeNode], node: usize, self_idx: usize, p: [f32; 2],
     }
     if n.children.iter().all(|c| *c == -1) || n.size / dist < THETA {
         let f = REPULSION * n.mass / d2 / dist;
-        forces[self_idx][0] += dx * f;
-        forces[self_idx][1] += dy * f;
+        out[0] += dx * f;
+        out[1] += dy * f;
         return;
     }
     for child in n.children {
         if child >= 0 {
-            apply_repulsion(tree, child as usize, self_idx, p, forces);
+            apply_repulsion(tree, child as usize, self_idx, p, out);
         }
     }
 }

@@ -32,7 +32,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetCursorPos, IsWindowVisible, SetForegroundWindow, SetWindowPos,
-    ShowWindow, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    ShowWindow, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
 };
 
 use store::Store;
@@ -42,6 +42,8 @@ enum Command {
     Toggle,
     Show,
     Quit,
+    Warm,
+    WarmHide,
 }
 
 /// GPUI's own `window_handle()` returns an `AnyWindowHandle`; call the
@@ -295,6 +297,55 @@ fn main() {
         };
         trace::log("startup_ready", app_started.elapsed());
 
+        // Warm first-frame costs while still hidden: shape the strings
+        // the editor screen shows (font/atlas warm-up) and request one
+        // frame so the swapchain exists before the first Alt+J. This
+        // never calls `activate_window()`.
+        let warm_t0 = std::time::Instant::now();
+        let _ = any_window.update(cx, |_, window, _cx| {
+            // `text_style()` needs a rendering view; use the default
+            // font directly (same family the theme resolves to).
+            let font = Font::default();
+            for s in [
+                "Capture a thought\u{2026}  (Tag: a, b  or  #hashtags)",
+                "Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags",
+                "#inbox  0 backlinks",
+            ] {
+                let _ = window.text_system().shape_line(
+                    s.to_string().into(),
+                    px(14.0),
+                    &[TextRun {
+                        len: s.len(),
+                        font: font.clone(),
+                        color: gpui_kit::black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+            }
+        });
+        // One invalidated frame while hidden (renders the editor once;
+        // `request_animation_frame` outside a view render panics on
+        // `current_view`, so this goes through the view instead).
+        let warm_view = view.clone();
+        let _ = warm_view.update(cx, |_, cx| cx.notify());
+        trace::log("warmup", warm_t0.elapsed());
+
+        // Swapchain warm-up: a hidden window never presents, so the
+        // first visible frame would pay GPU setup (~17ms). Show the
+        // placed window once with SW_SHOWNOACTIVATE (never focused,
+        // never `activate_window()`) and hide it after a short delay;
+        // an Alt+J inside that window adopts the warm show instead.
+        let warming = Rc::new(Cell::new(start_hidden));
+        if start_hidden {
+            // Sent to the command loop: the show must run outside any
+            // App borrow (a SetWindowPos/ShowWindow inside one
+            // re-enters GPUI's handlers and panics).
+            let _ = tx.try_send(Command::Warm);
+        }
+
         if !start_hidden {
             let _ = tx.try_send(Command::Show);
         }
@@ -304,16 +355,37 @@ fn main() {
         // (placement, ShowWindow) run *outside* `window.update`: a
         // cross-monitor SetWindowPos re-enters GPUI's move handler, which
         // panics on the already-borrowed App if called inside the update.
-        let placed = Rc::new(Cell::new(false));
+        let placed = Rc::new(Cell::new(start_hidden));
         let quit_store = store.clone();
+        let tx_loop = tx.clone();
         cx.spawn(async move |cx| {
             while let Ok(cmd) = rx.recv().await {
                 let view = view.clone();
                 let placed = placed.clone();
+                let warming = warming.clone();
                 let hwnd = hwnd_cell.get();
                 let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
                 match cmd {
-                    Command::Toggle if visible => {
+                    Command::Warm => {
+                        place_on_cursor_monitor(hwnd);
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        }
+                        let tx_hide = tx_loop.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            let _ = tx_hide.try_send(Command::WarmHide);
+                        });
+                    }
+                    Command::WarmHide => {
+                        if warming.get() {
+                            warming.set(false);
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_HIDE);
+                            }
+                        }
+                    }
+                    Command::Toggle if visible && !warming.get() => {
                         let _ = any_window.update(cx, |_, window, cx| {
                             view.update(cx, |v, cx| v.commit(window, cx));
                         });
@@ -322,9 +394,15 @@ fn main() {
                         }
                     }
                     Command::Toggle | Command::Show => {
-                        if !visible {
+                        // A show during warm-up adopts the already
+                        // visible (but unfocused) warm window.
+                        let adopt = warming.get();
+                        if adopt {
+                            warming.set(false);
+                        }
+                        if !visible || adopt {
                             let t0 = std::time::Instant::now();
-                            let first = !placed.get();
+                            let first = adopt || !placed.get();
                             if first {
                                 place_on_cursor_monitor(hwnd);
                                 placed.set(true);

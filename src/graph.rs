@@ -458,7 +458,7 @@ pub fn save_cache(dir: &Path, data: &GraphData, pos: &[[f32; 2]]) {
         buf.extend_from_slice(&pos[i][1].to_le_bytes());
     }
     let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::write(dir.join("graph_layout.bin"), buf);
+    let _ = crate::store::atomic_write(&dir.join("graph_layout.bin"), &buf);
 }
 
 pub fn load_cache(dir: &Path) -> HashMap<i64, [f32; 2]> {

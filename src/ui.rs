@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote]);
 
 /// Register keys. Must run after `gpui_kit::init` so the more specific
 /// `"TagSearch > Input"` context wins over the input's own `"Input"` bindings.
@@ -37,6 +37,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-enter", GraphEnlarge, Some("TagSearch")),
         KeyBinding::new("ctrl-enter", GraphEnlarge, Some("GraphView")),
         KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
+        KeyBinding::new("ctrl-shift-backspace", DeleteNote, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
         KeyBinding::new("up", SelectPrev, Some("TagSearch > Input")),
         KeyBinding::new("down", SelectNext, Some("TagSearch > Input")),
@@ -52,6 +53,7 @@ enum Screen {
     Backlinks(String),
     Themes,
     Graph,
+    Trash,
 }
 
 /// Schedule a `trace` entry for the next painted frame (no-op cost when
@@ -174,6 +176,10 @@ pub struct LazyKasten {
     theme_original: String,
     themes_loaded: bool,
     screen_gen: u64,
+    opened_mtime: Option<i64>,
+    autosave_gen: u64,
+    trash_notes: Vec<NoteSummary>,
+    trash_count: usize,
     graph: Option<GraphView>,
     graph_focus: FocusHandle,
     return_to_graph: bool,
@@ -235,6 +241,10 @@ impl LazyKasten {
             theme_original: String::new(),
             themes_loaded: false,
             screen_gen: 0,
+            opened_mtime: None,
+            autosave_gen: 0,
+            trash_notes: Vec::new(),
+            trash_count: 0,
             graph: None,
             graph_focus: cx.focus_handle(),
             return_to_graph: false,
@@ -251,6 +261,21 @@ impl LazyKasten {
 
     fn on_editor_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         trace_next_frame(window, "keystroke_to_frame");
+        // Autosave: 1.5s after the last keystroke, through the normal
+        // save path (which skips unchanged text). Debounced by gen.
+        self.autosave_gen += 1;
+        let seq = self.autosave_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.autosave_gen == seq && this.screen == Screen::Editor {
+                    this.save(window, cx);
+                }
+            });
+        })
+        .detach();
         let text = self.editor.read(cx).value();
         // Fast path: with no '#' or ':' anywhere and no tags yet, the note
         // cannot gain tags; skip the full parse on every keystroke.
@@ -394,6 +419,7 @@ impl LazyKasten {
         self.save(window, cx);
         let saved_id = self.note_id.clone();
         self.note_id = None;
+        self.opened_mtime = None;
         self.saved_text = SharedString::default();
         self.live_tags.clear();
         self.suggestions.clear();
@@ -587,19 +613,69 @@ impl LazyKasten {
                 id
             }
         };
+        // Never overwrite an outside edit: if the file changed on disk
+        // since this note was opened, write a conflict copy instead.
+        if !text.trim().is_empty() && self.opened_mtime.is_some() {
+            let expected = self.opened_mtime;
+            if self.store.note_mtime(&id) != expected {
+                match self.store.write_conflict_copy(&id, &text) {
+                    Ok(conflict) => {
+                        self.status = format!(
+                            "Changed outside the app \u{2014} your text saved as {conflict}.md"
+                        )
+                        .into();
+                        self.keep_status = true;
+                        self.saved_text = text;
+                        self.opened_mtime = self.store.note_mtime(&id);
+                    }
+                    Err(e) => {
+                        self.status = format!("Error: {e}").into();
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
         match self.store.save(&id, &text) {
             Ok(()) => {
                 self.status = if text.trim().is_empty() {
-                    "Deleted empty note".into()
+                    "Moved empty note to trash".into()
                 } else {
                     format!("Saved {id}.md").into()
                 };
                 self.saved_text = text;
+                self.opened_mtime = self.store.note_mtime(&id);
             }
             Err(e) => {
                 self.status = format!("Error: {e}").into();
             }
         }
+        cx.notify();
+    }
+
+    fn on_delete_note(&mut self, _: &DeleteNote, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Editor {
+            return;
+        }
+        if let Some(id) = self.note_id.clone() {
+            match self.store.trash_note(&id) {
+                Ok(_) => {
+                    self.status = format!("Moved {id}.md to trash").into();
+                    self.keep_status = true;
+                }
+                Err(e) => {
+                    self.status = format!("Error: {e}").into();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.note_id = None;
+        self.opened_mtime = None;
+        self.saved_text = SharedString::default();
+        self.live_tags.clear();
+        self.suggestions.clear();
+        self.editor.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
     }
 
@@ -629,6 +705,7 @@ impl LazyKasten {
                 self.link_matches.clear();
                 self.suggestions.clear();
                 self.saved_text = text.clone().into();
+                self.opened_mtime = self.store.note_mtime(id);
                 self.note_id = Some(id.to_string());
                 self.editor
                     .update(cx, |s, cx| s.set_value(text, window, cx));
@@ -1078,14 +1155,41 @@ impl LazyKasten {
         cx.notify();
         let store = self.store.clone();
         let task = cx.background_spawn(async move {
-            (store.tags().unwrap_or_default(), store.note_count().unwrap_or(0))
+            (
+                store.tags().unwrap_or_default(),
+                store.note_count().unwrap_or(0),
+                store.trashed_notes().map(|n| n.len()).unwrap_or(0),
+            )
         });
         cx.spawn(async move |this, cx| {
-            let (tags, total) = task.await;
+            let (tags, total, trash) = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.screen_gen == seq {
                     this.tags = tags;
                     this.note_total = total;
+                    this.trash_count = trash;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn show_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.screen_gen += 1;
+        let seq = self.screen_gen;
+        self.screen = Screen::Trash;
+        self.selected = 0;
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { store.trashed_notes().unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let notes = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.screen_gen == seq {
+                    this.trash_count = notes.len();
+                    this.trash_notes = notes;
                     cx.notify();
                 }
             });
@@ -1139,7 +1243,8 @@ impl LazyKasten {
 
     fn list_len(&self) -> usize {
         match self.screen {
-            Screen::Tags => self.tags.len(),
+            Screen::Tags => self.tags.len() + 1,
+            Screen::Trash => self.trash_notes.len(),
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
             Screen::Themes => self.theme_filtered.len(),
             Screen::Graph => 0,
@@ -1165,9 +1270,40 @@ impl LazyKasten {
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.screen {
             Screen::Tags => {
-                if let Some(tag) = self.tags.get(self.selected) {
+                if self.selected == self.tags.len() {
+                    self.show_trash(window, cx);
+                } else if let Some(tag) = self.tags.get(self.selected) {
                     let name = tag.name.clone();
                     self.show_tag(&name, window, cx);
+                }
+            }
+            Screen::Trash => {
+                if let Some(note) = self.trash_notes.get(self.selected) {
+                    let id = note.id.clone();
+                    let id_for_status = id.clone();
+                    let store = self.store.clone();
+                    let task = cx.background_spawn(async move {
+                        let r = store.restore_note(&id);
+                        let notes = store.trashed_notes().unwrap_or_default();
+                        (r, notes)
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let (r, notes) = task.await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.status = match r {
+                                Ok(()) => format!("Restored {id_for_status}.md").into(),
+                                Err(e) => format!("Error: {e}").into(),
+                            };
+                            this.keep_status = true;
+                            this.trash_count = notes.len();
+                            this.trash_notes = notes;
+                            if this.selected >= this.trash_notes.len() && this.selected > 0 {
+                                this.selected -= 1;
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                 }
             }
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => {
@@ -1256,6 +1392,7 @@ impl LazyKasten {
                 cx.notify();
             }
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.show_tags(window, cx),
+            Screen::Trash => self.show_tags(window, cx),
             Screen::Tags => {
                 self.screen = Screen::Editor;
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
@@ -1426,6 +1563,7 @@ impl LazyKasten {
                 }
             }
             Screen::Backlinks(_) => format!("Backlinks \u{00B7} {} notes", self.notes.len()),
+            Screen::Trash => format!("#trash \u{00B7} {} notes (Enter restores)", self.trash_notes.len()),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
             Screen::Graph => "Graph".to_string(),
             Screen::Editor => String::new(),
@@ -1451,6 +1589,27 @@ impl LazyKasten {
         }
 
         row = match &self.screen {
+            Screen::Tags if ix == self.tags.len() => row
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.muted_foreground)
+                        .child("#trash"),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{}", self.trash_count)),
+                ),
+            Screen::Trash => {
+                let note = &self.trash_notes[ix];
+                row.child(div().flex_1().overflow_hidden().child(note.title.clone()))
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(date_of_id(&note.id)),
+                    )
+            }
             Screen::Tags => {
                 let tag = &self.tags[ix];
                 row.child(
@@ -1926,6 +2085,7 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_graph_depth3))
             .on_action(cx.listener(Self::on_graph_enlarge))
             .on_action(cx.listener(Self::on_graph_search_focus))
+            .on_action(cx.listener(Self::on_delete_note))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

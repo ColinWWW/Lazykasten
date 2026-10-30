@@ -68,7 +68,10 @@ pub fn saved_theme_name(data_dir: &Path) -> String {
 
 pub fn write_saved_theme(data_dir: &Path, name: &str) {
     let _ = std::fs::create_dir_all(data_dir);
-    let _ = std::fs::write(data_dir.join("settings.toml"), format!("theme = \"{name}\"\n"));
+    let _ = crate::store::atomic_write(
+        &data_dir.join("settings.toml"),
+        format!("theme = \"{name}\"\n").as_bytes(),
+    );
 }
 
 /// Register a theme JSON with the registry (already-registered names are

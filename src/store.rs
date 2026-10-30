@@ -282,24 +282,111 @@ impl Store {
 
     fn save_impl(&self, id: &str, text: &str) -> Result<()> {
         if text.trim().is_empty() {
-            let path = self.note_path(id);
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-            }
-            let mut conn = self.conn.lock().expect("store lock poisoned");
-            let tx = conn.transaction()?;
-            Self::remove_note(&tx, id)?;
-            tx.commit()?;
+            // Empty text trashes the note (never a hard delete).
+            self.trash_note(id)?;
             return Ok(());
         }
         let path = self.note_path(id);
-        std::fs::write(&path, text)?;
+        atomic_write(&path, text.as_bytes())?;
         let mtime = file_mtime_ms(&path)?;
         let mut conn = self.conn.lock().expect("store lock poisoned");
         let tx = conn.transaction()?;
         Self::index_note(&tx, id, text, mtime)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn trash_dir(&self) -> PathBuf {
+        self.data_dir().join("trash")
+    }
+
+    /// Move a note file to `.lazykasten/trash/` and drop its index rows.
+    /// Returns true when a file was moved. Never hard-deletes.
+    pub fn trash_note(&self, id: &str) -> Result<bool> {
+        let path = self.note_path(id);
+        let mut moved = false;
+        if path.exists() {
+            let dir = self.trash_dir();
+            std::fs::create_dir_all(&dir)?;
+            let mut target = dir.join(format!("{id}.md"));
+            let mut n = 2;
+            while target.exists() {
+                target = dir.join(format!("{id}-{n}.md"));
+                n += 1;
+            }
+            std::fs::rename(&path, &target)?;
+            moved = true;
+        }
+        let mut conn = self.conn.lock().expect("store lock poisoned");
+        let tx = conn.transaction()?;
+        Self::remove_note(&tx, id)?;
+        tx.commit()?;
+        Ok(moved)
+    }
+
+    /// Notes currently in the trash, newest id first.
+    pub fn trashed_notes(&self) -> Result<Vec<NoteSummary>> {
+        let dir = self.trash_dir();
+        let mut out = Vec::new();
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let text = std::fs::read(&path)
+                    .map(|b| decode_note_bytes(&b).0)
+                    .unwrap_or_default();
+                out.push(NoteSummary {
+                    id: stem.to_string(),
+                    title: title_of(&text),
+                });
+            }
+        }
+        out.sort_by(|a, b| b.id.cmp(&a.id));
+        Ok(out)
+    }
+
+    /// Move a trashed note back into `notes/` and re-index it.
+    pub fn restore_note(&self, id: &str) -> Result<()> {
+        let from = self.trash_dir().join(format!("{id}.md"));
+        let to = self.note_path(id);
+        if to.exists() {
+            anyhow::bail!("a live note already uses id {id}");
+        }
+        std::fs::rename(&from, &to)?;
+        let text = self.read(id)?;
+        let mtime = file_mtime_ms(&to)?;
+        let mut conn = self.conn.lock().expect("store lock poisoned");
+        let tx = conn.transaction()?;
+        Self::index_note(&tx, id, &text, mtime)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The note file's current mtime in ms, if it exists.
+    pub fn note_mtime(&self, id: &str) -> Option<i64> {
+        file_mtime_ms(&self.note_path(id)).ok()
+    }
+
+    /// Save `text` as `<id>-conflict-<timestamp>.md` (a normal indexed
+    /// note) without touching the original file. Returns the new id.
+    pub fn write_conflict_copy(&self, id: &str, text: &str) -> Result<String> {
+        let base = format!(
+            "{id}-conflict-{}",
+            chrono::Local::now().format("%Y%m%d%H%M%S")
+        );
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while self.note_path(&candidate).exists() {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        self.save(&candidate, text)?;
+        Ok(candidate)
     }
 
     pub fn index_note(conn: &rusqlite::Connection, id: &str, text: &str, mtime: i64) -> Result<()> {
@@ -364,6 +451,18 @@ impl Store {
             for entry in std::fs::read_dir(&self.notes_dir)? {
                 let entry = entry?;
                 let path = entry.path();
+                // Ignore in-flight atomic writes; delete stale .tmp files.
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    let stale = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().map(|d| d.as_millis() > 60_000).unwrap_or(false))
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    continue;
+                }
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
@@ -652,6 +751,19 @@ impl Store {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))?;
         Ok(n)
     }
+}
+
+/// Write `bytes` to `path` atomically: `<name>.tmp` in the same folder,
+/// then rename over the target (rename replaces on Windows).
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| format!("{}.tmp", n.to_string_lossy()))
+        .unwrap_or_else(|| "file.tmp".to_string());
+    let tmp = path.with_file_name(name);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 pub fn file_mtime_ms(path: &Path) -> Result<i64> {
@@ -955,6 +1067,41 @@ mod tests {
             gdata.edges.len()
         );
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_trash_restore_and_conflict_copy() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000000", "Keep me\nTag: Rust").unwrap();
+        // Atomic save leaves no .tmp behind.
+        assert!(!root.join("notes").join("20260101000000.md.tmp").exists());
+
+        // Saving empty text trashes instead of deleting.
+        store.save("20260101000000", "").unwrap();
+        assert!(!store.note_path("20260101000000").exists());
+        assert_eq!(store.note_count().unwrap(), 0);
+        let trashed = store.trashed_notes().unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].id, "20260101000000");
+        assert_eq!(trashed[0].title, "Keep me");
+
+        // Restore brings it back, indexed.
+        store.restore_note("20260101000000").unwrap();
+        assert_eq!(store.read("20260101000000").unwrap(), "Keep me\nTag: Rust");
+        assert_eq!(store.note_count().unwrap(), 1);
+        assert!(store.trashed_notes().unwrap().is_empty());
+
+        // A conflict copy preserves the editor text under a new id and
+        // leaves the original file untouched.
+        let conflict = store
+            .write_conflict_copy("20260101000000", "My offline edits\nTag: Rust")
+            .unwrap();
+        assert!(conflict.starts_with("20260101000000-conflict-"), "{conflict}");
+        assert_eq!(store.read(&conflict).unwrap(), "My offline edits\nTag: Rust");
+        assert_eq!(store.read("20260101000000").unwrap(), "Keep me\nTag: Rust");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

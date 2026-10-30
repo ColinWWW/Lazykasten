@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp, RenameTag, UndoAutoTag, RelatedNotes]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp, RenameTag, UndoAutoTag, RelatedNotes, VimEscape]);
 
 /// Fuzzy title match: query chars must appear in order. The score
 /// favours word starts and consecutive runs. `None` = no match.
@@ -107,6 +107,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-backspace", DeleteNote, Some("LazyKasten")),
         KeyBinding::new("ctrl-p", QuickSwitcher, Some("LazyKasten")),
         KeyBinding::new("f2", RenameTag, Some("TagSearch")),
+        // Esc reaches the app as an action, not a raw key event, in
+        // this GPUI stack, so Vim's Esc rides the same path.
+        KeyBinding::new("escape", VimEscape, Some("VimNormal")),
+        KeyBinding::new("escape", VimEscape, Some("VimInsert")),
+        KeyBinding::new("escape", VimEscape, Some("VimVisual")),
+        KeyBinding::new("escape", VimEscape, Some("VimCommand")),
+        KeyBinding::new("escape", VimEscape, Some("VimSearch")),
+        KeyBinding::new("ctrl-[", VimEscape, Some("VimInsert")),
         KeyBinding::new("ctrl-z", UndoAutoTag, Some("LazyKasten")),
         KeyBinding::new("ctrl-r", RelatedNotes, Some("LazyKasten")),
         KeyBinding::new("ctrl-/", KeyHelp, Some("LazyKasten")),
@@ -222,6 +230,12 @@ pub struct LazyKasten {
     g_tags: bool,
     g_orphans: bool,
     g_center: Option<String>,
+    vim_enabled: bool,
+    vim: crate::vim::Engine,
+    vim_entry_keys: Vec<crate::vim::Key>,
+    vim_insert_start: Option<usize>,
+    vim_discard: bool,
+    pub hide_hook: Option<std::sync::mpsc::Sender<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -268,6 +282,11 @@ impl LazyKasten {
             .detach();
         }
 
+        let vim_on = crate::themes::read_settings(&store.data_dir())
+            .get("vim")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
         Self {
             store,
             editor,
@@ -311,6 +330,18 @@ impl LazyKasten {
             g_tags: true,
             g_orphans: false,
             g_center: None,
+            vim_enabled: vim_on,
+            vim: {
+                let mut engine = crate::vim::Engine::new();
+                if vim_on {
+                    engine.force_mode(crate::vim::Mode::Insert);
+                }
+                engine
+            },
+            vim_entry_keys: Vec::new(),
+            vim_insert_start: None,
+            vim_discard: false,
+            hide_hook: None,
             _subscriptions: subscriptions,
         }
     }
@@ -422,6 +453,11 @@ impl LazyKasten {
     /// Called when the window is shown: fresh editor, cursor ready.
     pub fn on_show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = Screen::Editor;
+        if self.vim_enabled && self.note_id.is_none() {
+            // A fresh capture starts in Insert; an open note keeps its mode.
+            self.vim.force_mode(crate::vim::Mode::Insert);
+            self.vim_sync_readonly(cx);
+        }
         // A status set by background auto-tagging survives one show so the
         // user sees what happened to the note they just hid.
         if self.keep_status {
@@ -578,6 +614,18 @@ impl LazyKasten {
     }
 
     fn on_back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_back(window, cx);
+    }
+
+    fn on_vim_escape(&mut self, _: &VimEscape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_enabled && self.screen == Screen::Editor {
+            self.vim_feed(crate::vim::Key::Esc, window, cx);
+        } else {
+            self.go_back(window, cx);
+        }
+    }
+
+    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.take().is_some() {
             self.show_tags(window, cx);
             return;
@@ -776,6 +824,7 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_new_note))
             .on_action(cx.listener(Self::on_browse))
             .on_action(cx.listener(Self::on_back))
+            .on_action(cx.listener(Self::on_vim_escape))
             .on_action(cx.listener(Self::on_select_prev))
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_suggest_tags))

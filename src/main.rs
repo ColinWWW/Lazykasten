@@ -6,6 +6,7 @@
 
 mod autotag;
 mod graph;
+mod vim;
 mod store;
 mod themes;
 mod trace;
@@ -45,6 +46,7 @@ enum Command {
     Warm,
     WarmHide,
     ToggleAutostart,
+    ToggleVim,
     FilesChanged(Vec<std::path::PathBuf>),
 }
 
@@ -364,13 +366,20 @@ fn main() {
             autostart_enabled(),
             None,
         );
+        let vim_item = tray_icon::menu::CheckMenuItem::new(
+            "Vim mode",
+            true,
+            settings.get("vim").map(|v| v == "true").unwrap_or(false),
+            None,
+        );
         let quit_item = MenuItem::new("Quit Lazykasten", true, None);
         let open_id = open_item.id().clone();
         let autostart_id = autostart_item.id().clone();
+        let vim_id = vim_item.id().clone();
         let quit_id = quit_item.id().clone();
         let menu = Menu::new();
         {
-            if menu.append_items(&[&open_item, &autostart_item, &quit_item]).is_ok() {
+            if menu.append_items(&[&open_item, &autostart_item, &vim_item, &quit_item]).is_ok() {
                 if let Ok(icon) = Icon::from_rgba(tray_rgba(), 32, 32) {
                     let built = TrayIconBuilder::new()
                         .with_icon(icon)
@@ -393,6 +402,8 @@ fn main() {
                 let _ = tx_menu.try_send(Command::Show);
             } else if e.id == autostart_id {
                 let _ = tx_menu.try_send(Command::ToggleAutostart);
+            } else if e.id == vim_id {
+                let _ = tx_menu.try_send(Command::ToggleVim);
             } else if e.id == quit_id {
                 let _ = tx_menu.try_send(Command::Quit);
             }
@@ -448,6 +459,20 @@ fn main() {
         };
         if let Some(msg) = hotkey_status.take() {
             let _ = view.update(cx, |v, cx| v.set_initial_status(msg, cx));
+        }
+        // Vim Esc / :q ask for a hide through this hook (the shell owns
+        // showing and hiding); forwarded to the toggle command.
+        {
+            let (hide_tx, hide_rx) = std::sync::mpsc::channel::<()>();
+            let tx_fwd = tx.clone();
+            std::thread::spawn(move || {
+                while hide_rx.recv().is_ok() {
+                    let _ = tx_fwd.try_send(Command::Toggle);
+                }
+            });
+            let _ = view.update(cx, |v, _cx| {
+                v.hide_hook = Some(hide_tx);
+            });
         }
         trace::log("startup_ready", app_started.elapsed());
 
@@ -556,6 +581,7 @@ fn main() {
             // of the startup closure drop when it returns.
             let _watcher_keep = _watcher;
             let autostart_item = autostart_item;
+            let vim_item = vim_item;
             while let Ok(cmd) = rx.recv().await {
                 let view = view.clone();
                 let placed = placed.clone();
@@ -567,6 +593,24 @@ fn main() {
                         let enable = !autostart_enabled();
                         set_autostart(enable);
                         autostart_item.set_checked(enable);
+                    }
+                    Command::ToggleVim => {
+                        let now = any_window
+                            .update(cx, |_, window, cx| {
+                                view.update(cx, |v, cx| {
+                                    let n = !v.vim_is_enabled();
+                                    v.set_vim_enabled(n, window, cx);
+                                    n
+                                })
+                            })
+                            .unwrap_or(false);
+                        vim_item.set_checked(now);
+                        let dir = settings_dir.clone();
+                        std::thread::spawn(move || {
+                            let mut map = themes::read_settings(&dir);
+                            map.insert("vim".to_string(), now.to_string());
+                            themes::write_settings(&dir, &map);
+                        });
                     }
                     Command::FilesChanged(paths) => {
                         let _ = any_window.update(cx, |_, window, cx| {

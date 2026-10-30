@@ -71,9 +71,25 @@ impl LazyKasten {
     /// stays instant; auto-tagging of an untagged note runs afterwards in
     /// the background and never delays the hide.
     pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_discard {
+            // Vim `:q!`: hide without saving.
+            self.vim_discard = false;
+            self.note_id = None;
+            self.opened_mtime = None;
+            self.saved_text = SharedString::default();
+            self.editor
+                .update(cx, |s, cx| s.set_value("", window, cx));
+            cx.notify();
+            return;
+        }
         let text_before = self.editor.read(cx).value().to_string();
         let untagged = parse_tags(&text_before).is_empty() && !text_before.trim().is_empty();
         self.save(window, cx);
+        if self.vim_enabled {
+            // A new note begins in Insert mode.
+            self.vim.force_mode(crate::vim::Mode::Insert);
+            self.vim_sync_readonly(cx);
+        }
         let saved_id = self.note_id.clone();
         self.note_id = None;
         self.opened_mtime = None;
@@ -277,6 +293,11 @@ impl LazyKasten {
                     .update(cx, |s, cx| s.set_value(text, window, cx));
                 self.screen = Screen::Editor;
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
+                if self.vim_enabled {
+                    // Opening an existing note begins in Normal mode.
+                    self.vim.force_mode(crate::vim::Mode::Normal);
+                    self.vim_sync_readonly(cx);
+                }
             }
             Err(e) => {
                 self.status = format!("Error: {e}").into();
@@ -285,6 +306,7 @@ impl LazyKasten {
         cx.notify();
     }
     pub(super) fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use unicode_segmentation::UnicodeSegmentation as _;
         let theme = row_colors(cx);
         let status = self.status.clone();
         let chips: Vec<String> = self.live_tags.clone();
@@ -377,6 +399,49 @@ impl LazyKasten {
             link_bar.border_t_1().border_color(theme.border).into_any_element()
         };
 
+        // Vim: block cursor bounds (relative to the textarea) and the
+        // mode badge / pending keys for the footer.
+        let vim_block = if self.vim_enabled && self.vim.mode != crate::vim::Mode::Insert {
+            let s = self.editor.read(cx);
+            let text = s.value();
+            let cur = s.cursor().min(text.len());
+            let end = text[cur..]
+                .graphemes(true)
+                .next()
+                .map(|g| cur + g.len())
+                .unwrap_or(cur);
+            s.range_to_bounds(&(cur..end))
+        } else {
+            None
+        };
+        let vim_ctx = match self.vim.mode {
+            crate::vim::Mode::Normal => "VimNormal",
+            crate::vim::Mode::Insert => "VimInsert",
+            crate::vim::Mode::Visual | crate::vim::Mode::VisualLine => "VimVisual",
+            crate::vim::Mode::Command => "VimCommand",
+            crate::vim::Mode::Search => "VimSearch",
+        };
+        let vim_badge: AnyElement = if self.vim_enabled {
+            let label = match self.vim.mode {
+                crate::vim::Mode::Normal => "-- NORMAL --".to_string(),
+                crate::vim::Mode::Insert => "-- INSERT --".to_string(),
+                crate::vim::Mode::Visual => "-- VISUAL --".to_string(),
+                crate::vim::Mode::VisualLine => "-- VISUAL LINE --".to_string(),
+                crate::vim::Mode::Command | crate::vim::Mode::Search => self.vim.pending_display(),
+            };
+            let pending = if matches!(self.vim.mode, crate::vim::Mode::Command | crate::vim::Mode::Search) {
+                String::new()
+            } else {
+                self.vim.pending_display()
+            };
+            div()
+                .text_color(if self.vim.mode == crate::vim::Mode::Insert { theme.blue } else { theme.muted_foreground })
+                .child(if pending.is_empty() { label } else { format!("{label}  {pending}") })
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let right: AnyElement = if status.is_empty() {
             div()
                 .text_color(theme.muted_foreground)
@@ -393,12 +458,28 @@ impl LazyKasten {
             .flex()
             .flex_col()
             .size_full()
+            .key_context(vim_ctx)
+            .capture_key_down(cx.listener(Self::on_vim_key_down))
             .child(
                 div()
                     .flex_1()
                     .px_6()
                     .pt_4()
-                    .child(Textarea::new(&self.editor).appearance(false).large().h_full()),
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            .child(Textarea::new(&self.editor).appearance(false).large().h_full())
+                            .children(vim_block.map(|b| {
+                                div()
+                                    .absolute()
+                                    .left(b.origin.x)
+                                    .top(b.origin.y)
+                                    .w(b.size.width.max(px(9.0)))
+                                    .h(b.size.height)
+                                    .bg(hsla(theme.blue.h, theme.blue.s, theme.blue.l, 0.45))
+                            })),
+                    ),
             )
             .child(link_bar)
             .child(
@@ -411,6 +492,7 @@ impl LazyKasten {
                     .border_color(theme.border)
                     .px_4()
                     .child(chip_row)
+                    .child(vim_badge)
                     .child(right),
             )
     }
@@ -445,5 +527,250 @@ impl LazyKasten {
             });
         })
         .detach();
+    }
+}
+
+impl LazyKasten {
+    /// Readonly whenever Vim is on and not in Insert mode (the engine
+    /// is then the only writer, so caret shape/IME stay sane).
+    pub(super) fn vim_sync_readonly(&mut self, cx: &mut Context<Self>) {
+        let readonly = self.vim_enabled && self.vim.mode != crate::vim::Mode::Insert;
+        self.editor.update(cx, |s, cx| s.set_readonly(readonly, cx));
+    }
+
+    pub fn vim_is_enabled(&self) -> bool {
+        self.vim_enabled
+    }
+
+    pub fn set_vim_enabled(&mut self, enabled: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        self.vim_enabled = enabled;
+        if enabled {
+            let mode = if self.note_id.is_some() {
+                crate::vim::Mode::Normal
+            } else {
+                crate::vim::Mode::Insert
+            };
+            self.vim.force_mode(mode);
+        }
+        self.vim_sync_readonly(cx);
+        self.status = if enabled { "Vim mode on".into() } else { "Vim mode off".into() };
+        self.keep_status = true;
+        cx.notify();
+    }
+
+    pub(super) fn on_vim_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::vim::{Key, Mode};
+        if !self.vim_enabled || self.screen != Screen::Editor {
+            return;
+        }
+        let ks = &ev.keystroke;
+        if self.vim.mode == Mode::Insert {
+            if ks.key == "escape" || (ks.modifiers.control && ks.key == "[") {
+                self.vim_feed(Key::Esc, window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if ks.modifiers.alt {
+            return;
+        }
+        let key = if ks.key == "escape" {
+            Key::Esc
+        } else if ks.key == "enter" {
+            Key::Enter
+        } else if ks.modifiers.control {
+            match ks.key.as_str() {
+                "r" => Key::Ctrl('r'),
+                "d" => Key::Ctrl('d'),
+                "u" => Key::Ctrl('u'),
+                "[" => Key::Esc,
+                "c" if self.vim.mode == Mode::Visual || self.vim.mode == Mode::VisualLine => Key::Esc,
+                _ => return,
+            }
+        } else if let Some(kc) = &ks.key_char {
+            match kc.chars().next() {
+                Some(c) => Key::Char(c),
+                None => return,
+            }
+        } else if ks.key.chars().count() == 1 {
+            Key::Char(ks.key.chars().next().unwrap())
+        } else {
+            return;
+        };
+        self.vim_feed(key, window, cx);
+        cx.stop_propagation();
+    }
+
+    pub(super) fn vim_feed(&mut self, key: crate::vim::Key, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::vim::{Key, Mode};
+        use unicode_segmentation::UnicodeSegmentation as _;
+        let text = self.editor.read(cx).value().to_string();
+        let sel = self.editor.read(cx).selected_range();
+        let cursor = if sel.is_empty() {
+            sel.start.min(text.len())
+        } else {
+            // Head of the selection: the grapheme before its end.
+            let mut p = sel.end.min(text.len());
+            if p > sel.start {
+                p = text[..p]
+                    .graphemes(true)
+                    .next_back()
+                    .map(|g| p - g.len())
+                    .unwrap_or(sel.start);
+            }
+            p
+        };
+        let was_insert = self.vim.mode == Mode::Insert;
+        if !was_insert {
+            self.vim_entry_keys.push(key.clone());
+        }
+        if matches!(key, Key::Char('.')) && !was_insert {
+            self.vim_repeat(window, cx);
+            self.vim_sync_readonly(cx);
+            cx.notify();
+            return;
+        }
+        let out = self.vim.handle_key(&text, cursor, key.clone());
+        self.vim_apply(out, &text, window, cx);
+        // Insert-session bookkeeping for dot-repeat.
+        if was_insert && matches!(key, Key::Esc | Key::Ctrl('[')) {
+            let now = self.editor.read(cx).value().to_string();
+            let cur = self.editor.read(cx).cursor();
+            let typed = self
+                .vim_insert_start
+                .filter(|s| *s <= cur && cur <= now.len())
+                .map(|s| now[s..cur].to_string())
+                .unwrap_or_default();
+            self.vim.note_insert_finished(&typed, std::mem::take(&mut self.vim_entry_keys));
+            self.vim_insert_start = None;
+        }
+        if self.vim.mode == Mode::Insert && self.vim_insert_start.is_none() {
+            self.vim_insert_start = Some(self.editor.read(cx).cursor());
+        }
+        if self.vim.mode != Mode::Insert && self.vim.pending_display().is_empty() {
+            self.vim_entry_keys.clear();
+        }
+        self.vim_sync_readonly(cx);
+        cx.notify();
+    }
+
+    fn vim_repeat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::vim::{Key, Mode};
+        let Some((keys, insert)) = self.vim.repeat_change() else {
+            return;
+        };
+        for k in keys {
+            let text = self.editor.read(cx).value().to_string();
+            let sel = self.editor.read(cx).selected_range();
+            let out = self.vim.handle_key(&text, sel.start.min(text.len()), k);
+            self.vim_apply(out, &text, window, cx);
+            if self.vim.mode == Mode::Insert {
+                break;
+            }
+        }
+        if let Some(ins) = insert {
+            if self.vim.mode == Mode::Insert {
+                let cur = self.editor.read(cx).cursor();
+                self.editor.update(cx, |s, cx| {
+                    s.set_selected_range(cur..cur, cx);
+                    s.replace(&ins, window, cx);
+                });
+                let text = self.editor.read(cx).value().to_string();
+                let cur = self.editor.read(cx).cursor();
+                let out = self.vim.handle_key(&text, cur, Key::Esc);
+                self.vim_apply(out, &text, window, cx);
+            }
+        }
+        let _ = Mode::Normal;
+    }
+
+    fn vim_apply(&mut self, out: crate::vim::Out, text_before: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::vim::Effect;
+        let mut edits: Vec<&crate::vim::Edit> = out.edits.iter().collect();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+        for e in edits {
+            let range = e.range.clone();
+            let replacement = e.text.clone();
+            self.editor.update(cx, |s, cx| {
+                s.set_selected_range(range, cx);
+                s.replace(&replacement, window, cx);
+            });
+        }
+        match out.selection.clone() {
+            Some(sel) => {
+                self.editor.update(cx, |s, cx| s.set_selected_range(sel, cx));
+            }
+            None => {
+                let c = out.cursor;
+                self.editor.update(cx, |s, cx| s.set_selected_range(c..c, cx));
+            }
+        }
+        match out.effect {
+            Effect::Yank(text, _) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Effect::PasteRequest(before) => {
+                let clip = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text().map(|t| t.to_string()))
+                    .unwrap_or_default();
+                let text = self.editor.read(cx).value().to_string();
+                let out2 = self.vim.paste_text(&text, &clip, out.cursor, before);
+                self.vim_apply(out2, &text, window, cx);
+            }
+            Effect::Undo => {
+                window.dispatch_action(Box::new(gpui_kit::component::input::Undo), cx);
+            }
+            Effect::Redo => {
+                window.dispatch_action(Box::new(gpui_kit::component::input::Redo), cx);
+            }
+            Effect::HideRequest => {
+                if let Some(hook) = &self.hide_hook {
+                    let _ = hook.send(());
+                }
+            }
+            Effect::ExCommand(cmd) => {
+                self.vim_ex(&cmd, window, cx);
+            }
+            Effect::ScrollHalf(dir) => {
+                crate::trace::info(&format!("vim scroll half {dir}"));
+            }
+            Effect::CenterLine => {
+                crate::trace::info("vim zz");
+            }
+            Effect::RepeatRequest | Effect::None | Effect::Bell => {}
+        }
+        let _ = text_before;
+    }
+
+    fn vim_ex(&mut self, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match cmd.trim() {
+            "w" => self.save(window, cx),
+            "q" => {
+                self.save(window, cx);
+                if let Some(hook) = &self.hide_hook {
+                    let _ = hook.send(());
+                }
+            }
+            "wq" | "x" => {
+                self.save(window, cx);
+                if let Some(hook) = &self.hide_hook {
+                    let _ = hook.send(());
+                }
+            }
+            "q!" => {
+                // Discard: the hide path must not save.
+                self.vim_discard = true;
+                let saved = self.saved_text.clone();
+                self.editor.update(cx, |s, cx| s.set_value(saved, window, cx));
+                if let Some(hook) = &self.hide_hook {
+                    let _ = hook.send(());
+                }
+            }
+            other => {
+                self.status = format!("Not an editor command: {other}").into();
+                cx.notify();
+            }
+        }
     }
 }

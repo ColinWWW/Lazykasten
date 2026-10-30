@@ -110,3 +110,21 @@ settling at that extreme scale (rendering stays view-culled and input
 responsive); global positions are cached to `graph_layout.bin`, so a
 settled 20k graph reopens without re-simulating. At demo-vault scale
 (hundreds of notes) it settles in about a second at 60fps.
+
+## Vim and the visual pass (prompt 6, milestones 30-41)
+
+- **Vim engine: 0.064ms per keystroke** over a 343,890-byte /
+  5,000-line note (`cargo test --release bench_vim -- --ignored`),
+  motions included; the engine never copies the text on a motion and
+  edit lists are applied back-to-front by the UI. Budget was 1ms.
+- Design tokens live in `src/ui/style.rs`; per-tag colours are an
+  FNV hash to hue with a WCAG contrast nudge (>=4.5:1 against the theme
+  background, unit-tested), shared by editor chips, the preview pane
+  and graph nodes so colours cost one hash per chip per render.
+- The two-pane preview reads the selected note on a background task
+  (900 chars kept); selection movement never touches the disk on the
+  UI thread. Smooth graph zoom is one lerp per painted frame inside
+  the existing canvas prepaint - no extra passes; the graph layout
+  numbers above are unchanged (parallel Barnes-Hut, step ~8ms at 20k).
+- Smoke: `scripts/smoke.ps1` green; screenshot review notes and the
+  three fixes they produced are in `docs/ui-review.md`.

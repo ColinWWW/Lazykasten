@@ -54,6 +54,7 @@ impl LazyKasten {
             ("Keyboard shortcuts", "Ctrl+/", "help"),
             ("Related notes", "Ctrl+R", "related"),
             ("Toggle focus mode", "Ctrl+.", "focus"),
+            ("About Lazykasten", "", "about"),
         ]
     }
 
@@ -113,6 +114,12 @@ impl LazyKasten {
                 self.on_related_notes(&RelatedNotes, window, cx);
             }
             "focus" => self.on_focus_mode(&FocusMode, window, cx),
+            "about" => {
+                self.screen = Screen::Editor;
+                self.editor.update(cx, |s, cx| s.focus(window, cx));
+                self.toast("Lazykasten 0.1.0 \u{2014} local-first notes. Alt+J anywhere, files are the source of truth.", cx);
+                cx.notify();
+            }
             _ => {}
         }
     }

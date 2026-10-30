@@ -16,6 +16,8 @@ note is saved, tagged, and indexed.
 | Ctrl+R | Related notes for the open note |
 | Ctrl+Z | Undo the last auto-tagging (right after it happens) |
 | Ctrl+Shift+Backspace | Move the open note to the trash |
+| Ctrl+Shift+P | Command palette (themes, Vim toggle, About, everything) |
+| Ctrl+. | Focus mode: hide chips and footer hints |
 | Ctrl+/ or F1 | Key help (the same table the app shows) |
 | F2 | Rename the selected tag (on the tag list; merges if the name exists) |
 | Ctrl+T | Suggest tags for the open note (click a chip to apply) |
@@ -62,8 +64,11 @@ footer shows its backlink count — click it to list the notes that link to it.
 ## Graph
 
 **Ctrl+G** opens a force-directed graph of your notes (Obsidian-style):
-note circles coloured by first tag, tag squares, deterministic Barnes-Hut
-layout on a background thread.
+note circles coloured by first tag (the same colour as the tag's chip
+in the editor, legend in the corner), tag squares, deterministic Barnes-Hut
+layout on a background thread. Hovering a node dims everything that is
+not its neighbour; wheel zoom eases toward the target (set
+`LAZYKASTEN_REDUCED_MOTION=1` for instant zoom).
 
 - **Tab** switches Local (around the open note) <-> Global; **T** toggles
   tag nodes, **O** toggles orphan notes, **1/2/3** set the local depth,
@@ -76,13 +81,40 @@ layout on a background thread.
 - Global positions persist in `<vault>/.lazykasten/graph_layout.bin`, so
   reopening the global graph does not restart the simulation.
 
+## Vim mode
+
+Optional, off by default: tray menu → **Vim mode**, the palette, or
+`"vim" = "true"` in settings. A real modal engine (pure Rust, table
+tested, ~0.064ms per keystroke on a 5000-line note): Normal / Insert /
+Visual / Visual Line / Command / Search modes, motions and operators
+with counts (`d2j`, `2dd`, `ciw`, `y$`), text objects, `f`/`t`, search
+with smartcase, `:w :q :wq :x :q!`, undo/redo and `.` repeat. The
+footer shows the mode badge and pending keys; a block cursor marks the
+current grapheme outside Insert. Lists and the graph speak Vim too:
+`j k gg G` and `Ctrl+D/U` on lists (with Vim on, `/` starts typing),
+`hjkl` pan / `e E` zoom / `i` open / `q` leave on the graph.
+
+## Command palette and browsing
+
+**Ctrl+Shift+P** opens the command palette: fuzzy-filtered commands
+with their shortcuts, including theme picker, Vim toggle, focus mode
+and an About entry. Actions confirm with a toast in the corner.
+Browsing a tag on a wide window shows a preview pane with the selected
+note's title, tags and text; it follows the selection. In the editor,
+typing `#daily ` or `#todo ` followed by a space expands a snippet,
+and tag chips / `[[link]]` suggestions are coloured pills — each tag
+keeps one colour (contrast-checked) in the chips, the preview and the
+graph. With no saved theme, the app follows the Windows light/dark
+setting; on Windows 11 the window gets DWM rounded corners.
+
 ## Themes
 
 25 bundled themes (Catppuccin, Gruvbox, Tokyo Night, Nord, Dracula,
 Solarized, Rosé Pine, Kanagawa, Everforest, Ayu, GitHub, Monokai, One Dark,
 and the default Lazykasten Dark), all fully local.
 
-- **Ctrl+Shift+P** (or Ctrl+K then T) opens the theme picker. Arrow keys
+- **Ctrl+Shift+P** opens the command palette; pick **Themes…** there
+  (or jump straight with Ctrl+K then T). Arrow keys
   preview each theme live; **Enter** keeps it and saves the choice, **Esc**
   reverts. The search box filters by name.
 - The choice is stored in `<vault>/.lazykasten/settings.toml` and survives
@@ -126,6 +158,7 @@ Notes are hard to lose:
 | `hotkey` | Global show/hide hotkey, e.g. `alt+j` (falls back to Alt+J with a status note) |
 | `vault` | Vault path override, read from the default vault's settings |
 | `window` | Remembered window `x,y,w,h` (written when the window hides) |
+| `vim` | `"true"` enables Vim mode (also toggleable from the tray or palette) |
 
 The tray menu has a **Start with Windows** checkbox
 (`HKCU\...\Run\Lazykasten` = `"<exe>" --hidden`). The exe carries an
@@ -160,6 +193,16 @@ cargo test --release -- --ignored --nocapture   # 20,000-note benchmark
 
 Kill any running `lazykasten.exe` before rebuilding; Windows locks the exe
 while it runs. Faster edit-compile loop: `cargo run --release`.
+
+## Screenshots
+
+![Editor](docs/img/editor.png)
+![Command palette](docs/img/palette.png)
+![Browse with preview](docs/img/browse-preview.png)
+![Graph](docs/img/graph.png)
+
+More in `docs/img/`; the prompt-6 screenshot review is
+`docs/ui-review.md`.
 
 ## Run
 

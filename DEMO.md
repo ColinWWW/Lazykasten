@@ -36,7 +36,9 @@ exits quietly (single instance).
    target note: its footer shows "1 backlinks" — click it to list the
    linking notes.
 8. **Graph (10s).** Press **Ctrl+G**: the vault as a force-directed
-   graph, notes coloured by tag. Drag a node, scroll to zoom, single-click
+   graph, notes coloured by tag (legend bottom-left, same colours as
+   the footer chips). Drag a node, scroll to zoom (it eases), hover a
+   node to dim everything but its neighbours, single-click
    a note to open it (Esc returns to the graph). Tab flips Local/Global.
 8b. **Quick switcher (5s).** Press **Ctrl+P** and type a few letters of
    any title ("spice") — fuzzy matching jumps straight to the note,
@@ -46,9 +48,17 @@ exits quietly (single instance).
    press **F2**, type the new name, Enter: every note is rewritten and
    the status reports how many changed. Renaming into an existing tag
    merges them.
-9. **Theme flip (10s).** Press **Ctrl+Shift+P** and arrow through five
-   themes, each previews live in one frame. Press Enter to keep one
-   (it survives restarts), or Esc to revert.
+9. **Theme flip (10s).** Press **Ctrl+Shift+P**, pick **Themes…**, and arrow through five
+   themes, each previews live in one frame. Press Enter to keep one (a toast confirms; it survives restarts), or Esc
+   to revert. Ctrl+K then T jumps straight to themes.
+9b. **Command palette + preview (10s).** Ctrl+Shift+P again and type
+   "vim": every command is fuzzy-searchable. Then Ctrl+O, open #Cooking`r
+   on a wide window: moving with the arrows updates the preview pane on
+   the right - title, tags, first paragraph.
+9c. **Vim (15s).** Enable Vim from the palette ("Toggle Vim mode").
+   In a note: Esc for Normal, `0dw` deletes a word, `A!` appends at
+   line end, `:q` saves and hides. The footer badge shows the mode.
+   Lists take `j k gg G` too; the graph pans with `hjkl`.
 10. **Numbers (10s).** Run in a terminal:
    - `lazykasten.exe --eval-tags` — leave-one-out accuracy: on the demo
      vault, precision 1.000, recall 1.000, 0.82 ms per note. Thresholds:

@@ -746,6 +746,18 @@ impl Store {
         Ok(out)
     }
 
+    /// All `(id, title)` pairs, newest id first (quick-switcher index).
+    pub fn notes_titles(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare_cached("SELECT id, title FROM notes ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn note_count(&self) -> Result<i64> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))?;
@@ -1080,6 +1092,29 @@ mod tests {
         println!(
             "graph settle from scratch: {:.3}s in {steps} steps",
             t0.elapsed().as_secs_f64()
+        );
+
+        // Quick switcher: fuzzy filter over every title, per keystroke.
+        let titles = store.notes_titles().unwrap();
+        let index: Vec<(String, String, String)> = titles
+            .into_iter()
+            .map(|(id, title)| {
+                let lower = title.to_lowercase();
+                (title, lower, id)
+            })
+            .collect();
+        let t0 = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..10 {
+            hits = index
+                .iter()
+                .filter(|(_, lower, _)| crate::ui::fuzzy_score(lower, "note").is_some())
+                .count();
+        }
+        println!(
+            "switcher fuzzy ({} titles): {:.3}ms per keystroke ({hits} hits)",
+            index.len(),
+            t0.elapsed().as_secs_f64() * 1000.0 / 10.0
         );
 
         drop(store);

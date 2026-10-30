@@ -9,7 +9,72 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp]);
+
+/// Fuzzy title match: query chars must appear in order. The score
+/// favours word starts and consecutive runs. `None` = no match.
+pub fn fuzzy_score(title_lower: &str, query_lower: &str) -> Option<i64> {
+    if query_lower.is_empty() {
+        return Some(0);
+    }
+    let title: Vec<char> = title_lower.chars().collect();
+    let mut score: i64 = 0;
+    let mut ti = 0usize;
+    let mut prev_idx: Option<usize> = None;
+    for qc in query_lower.chars() {
+        let mut found = None;
+        while ti < title.len() {
+            if title[ti] == qc {
+                found = Some(ti);
+                break;
+            }
+            ti += 1;
+        }
+        let idx = found?;
+        score += 1;
+        if prev_idx == Some(idx.wrapping_sub(1)) && idx > 0 {
+            score += 5;
+        }
+        if idx == 0 || !title[idx - 1].is_alphanumeric() {
+            score += 8;
+        }
+        prev_idx = Some(idx);
+        ti = idx + 1;
+    }
+    Some(score - title.len() as i64 / 16)
+}
+
+/// One key table for the help overlay (and the bindings in
+/// `bind_keys`): (screen, keys, what it does).
+pub const KEY_HELP: &[(&str, &str, &str)] = &[
+    ("Everywhere", "Alt+J", "Show / hide (saves the open note)"),
+    ("Everywhere", "Ctrl+/", "This key help (also F1)"),
+    ("Editor", "Ctrl+S", "Save now"),
+    ("Editor", "Ctrl+N", "Save and start a new note"),
+    ("Editor", "Ctrl+O", "Browse tags"),
+    ("Editor", "Ctrl+P", "Quick switcher: open a note by title"),
+    ("Editor", "Ctrl+T", "Suggest tags for this note"),
+    ("Editor", "Ctrl+G", "Open the graph around this note"),
+    ("Editor", "Ctrl+Shift+P", "Theme picker (also Ctrl+K then T)"),
+    ("Editor", "Ctrl+Shift+Backspace", "Move this note to trash"),
+    ("Editor", "Esc", "Dismiss suggestions / back from graph-opened note"),
+    ("Browser", "Typing", "Search all notes"),
+    ("Browser", "Up / Down", "Move the selection"),
+    ("Browser", "Enter", "Open the tag / note / restore from #trash"),
+    ("Browser", "Ctrl+Shift+T", "Auto-tag every #inbox note (on the tag list)"),
+    ("Browser", "Esc", "Back"),
+    ("Graph", "Tab", "Local / Global"),
+    ("Graph", "T", "Toggle tag nodes"),
+    ("Graph", "O", "Toggle orphans"),
+    ("Graph", "1 / 2 / 3", "Local depth"),
+    ("Graph", "/ or Ctrl+F", "Focus the graph search box"),
+    ("Graph", "Ctrl+Enter", "Enlarge / restore the window"),
+    ("Graph", "Click", "Open the note (drag moves it instead)"),
+    ("Graph", "Esc", "Back (from search: back to the canvas)"),
+    ("Themes", "Up / Down", "Preview the theme live"),
+    ("Themes", "Enter", "Keep and save the theme"),
+    ("Themes", "Esc", "Revert to the previous theme"),
+];
 
 /// Register keys. Must run after `gpui_kit::init` so the more specific
 /// `"TagSearch > Input"` context wins over the input's own `"Input"` bindings.
@@ -38,6 +103,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-enter", GraphEnlarge, Some("GraphView")),
         KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
         KeyBinding::new("ctrl-shift-backspace", DeleteNote, Some("LazyKasten")),
+        KeyBinding::new("ctrl-p", QuickSwitcher, Some("LazyKasten")),
+        KeyBinding::new("ctrl-/", KeyHelp, Some("LazyKasten")),
+        KeyBinding::new("f1", KeyHelp, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
         KeyBinding::new("up", SelectPrev, Some("TagSearch > Input")),
         KeyBinding::new("down", SelectNext, Some("TagSearch > Input")),
@@ -54,6 +122,8 @@ enum Screen {
     Themes,
     Graph,
     Trash,
+    Switcher,
+    Help,
 }
 
 /// Schedule a `trace` entry for the next painted frame (no-op cost when
@@ -180,6 +250,8 @@ pub struct LazyKasten {
     autosave_gen: u64,
     trash_notes: Vec<NoteSummary>,
     trash_count: usize,
+    switcher_index: Vec<(String, String, String)>,
+    switcher_results: Vec<NoteSummary>,
     graph: Option<GraphView>,
     graph_focus: FocusHandle,
     return_to_graph: bool,
@@ -216,6 +288,26 @@ impl LazyKasten {
             }
         }));
 
+        // Quick-switcher title index: loaded in the background at
+        // startup, refreshed after saves.
+        {
+            let index_store = store.clone();
+            let task = cx.background_spawn(async move { index_store.notes_titles().unwrap_or_default() });
+            cx.spawn(async move |this, cx| {
+                let rows = task.await;
+                let _ = this.update(cx, |this, _cx| {
+                    this.switcher_index = rows
+                        .into_iter()
+                        .map(|(id, title)| {
+                            let lower = title.to_lowercase();
+                            (title, lower, id)
+                        })
+                        .collect();
+                });
+            })
+            .detach();
+        }
+
         Self {
             store,
             editor,
@@ -245,6 +337,8 @@ impl LazyKasten {
             autosave_gen: 0,
             trash_notes: Vec::new(),
             trash_count: 0,
+            switcher_index: Vec::new(),
+            switcher_results: Vec::new(),
             graph: None,
             graph_focus: cx.focus_handle(),
             return_to_graph: false,
@@ -325,6 +419,9 @@ impl LazyKasten {
     }
 
     fn on_search_change(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Help {
+            return;
+        }
         let query = self.search.read(cx).value().to_string();
         if self.screen == Screen::Graph {
             self.search_gen += 1;
@@ -366,6 +463,34 @@ impl LazyKasten {
                 .collect();
             self.selected = 0;
             self.preview_theme(cx);
+            cx.notify();
+            return;
+        }
+        if self.screen == Screen::Switcher {
+            // In-memory fuzzy filter over the title index (no disk, no
+            // SQL): scores computed locally per keystroke.
+            let q = query.trim().to_lowercase();
+            if q.is_empty() {
+                self.switcher_results = self
+                    .switcher_index
+                    .iter()
+                    .take(200)
+                    .map(|(title, _, id)| NoteSummary { id: id.clone(), title: title.clone() })
+                    .collect();
+            } else {
+                let mut scored: Vec<(i64, &String, &String)> = self
+                    .switcher_index
+                    .iter()
+                    .filter_map(|(title, lower, id)| fuzzy_score(lower, &q).map(|s| (s, title, id)))
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                scored.truncate(200);
+                self.switcher_results = scored
+                    .into_iter()
+                    .map(|(_, title, id)| NoteSummary { id: id.clone(), title: title.clone() })
+                    .collect();
+            }
+            self.selected = 0;
             cx.notify();
             return;
         }
@@ -645,11 +770,55 @@ impl LazyKasten {
                 };
                 self.saved_text = text;
                 self.opened_mtime = self.store.note_mtime(&id);
+                self.refresh_switcher_index(cx);
             }
             Err(e) => {
                 self.status = format!("Error: {e}").into();
             }
         }
+        cx.notify();
+    }
+
+    fn refresh_switcher_index(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { store.notes_titles().unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let rows = task.await;
+            let _ = this.update(cx, |this, _cx| {
+                this.switcher_index = rows
+                    .into_iter()
+                    .map(|(id, title)| {
+                        let lower = title.to_lowercase();
+                        (title, lower, id)
+                    })
+                    .collect();
+            });
+        })
+        .detach();
+    }
+
+    fn on_quick_switcher(&mut self, _: &QuickSwitcher, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Editor {
+            self.save(window, cx);
+        }
+        self.screen = Screen::Switcher;
+        self.selected = 0;
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        // Empty query: recent notes first (the index is id-desc).
+        self.switcher_results = self
+            .switcher_index
+            .iter()
+            .take(200)
+            .map(|(title, _, id)| NoteSummary { id: id.clone(), title: title.clone() })
+            .collect();
+        cx.notify();
+    }
+
+    fn on_key_help(&mut self, _: &KeyHelp, window: &mut Window, cx: &mut Context<Self>) {
+        self.screen = Screen::Help;
+        self.selected = 0;
+        self.search.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
 
@@ -1245,6 +1414,8 @@ impl LazyKasten {
         match self.screen {
             Screen::Tags => self.tags.len() + 1,
             Screen::Trash => self.trash_notes.len(),
+            Screen::Switcher => self.switcher_results.len(),
+            Screen::Help => KEY_HELP.len(),
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
             Screen::Themes => self.theme_filtered.len(),
             Screen::Graph => 0,
@@ -1314,6 +1485,14 @@ impl LazyKasten {
                 }
             }
             Screen::Themes => self.keep_theme(window, cx),
+            Screen::Switcher => {
+                if let Some(note) = self.switcher_results.get(self.selected) {
+                    let id = note.id.clone();
+                    self.return_to_graph = false;
+                    self.open_note(&id, window, cx);
+                }
+            }
+            Screen::Help => {}
             Screen::Graph => {}
             Screen::Editor => {}
         }
@@ -1393,6 +1572,11 @@ impl LazyKasten {
             }
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.show_tags(window, cx),
             Screen::Trash => self.show_tags(window, cx),
+            Screen::Switcher | Screen::Help => {
+                self.screen = Screen::Editor;
+                self.editor.update(cx, |s, cx| s.focus(window, cx));
+                cx.notify();
+            }
             Screen::Tags => {
                 self.screen = Screen::Editor;
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
@@ -1564,6 +1748,8 @@ impl LazyKasten {
             }
             Screen::Backlinks(_) => format!("Backlinks \u{00B7} {} notes", self.notes.len()),
             Screen::Trash => format!("#trash \u{00B7} {} notes (Enter restores)", self.trash_notes.len()),
+            Screen::Switcher => format!("Quick switch \u{00B7} {} of {} notes", self.switcher_results.len(), self.switcher_index.len()),
+            Screen::Help => "Keys".to_string(),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
             Screen::Graph => "Graph".to_string(),
             Screen::Editor => String::new(),
@@ -1665,6 +1851,26 @@ impl LazyKasten {
                             .child(if entry.dark { "dark" } else { "light" }),
                     )
                     .child(swatches)
+            }
+            Screen::Switcher => {
+                let note = &self.switcher_results[ix];
+                row.child(div().flex_1().overflow_hidden().child(note.title.clone()))
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(date_of_id(&note.id)),
+                    )
+            }
+            Screen::Help => {
+                let (screen, keys, desc) = KEY_HELP[ix];
+                row.child(
+                    div()
+                        .w(px(110.0))
+                        .text_color(theme.muted_foreground)
+                        .child(screen),
+                )
+                .child(div().w(px(210.0)).text_color(theme.blue).child(keys))
+                .child(div().flex_1().overflow_hidden().child(desc))
             }
             _ => {
                 let note = &self.notes[ix];
@@ -2014,6 +2220,22 @@ mod tests {
     use super::{complete_link, open_link_query};
 
     #[test]
+    #[test]
+    fn test_fuzzy_score() {
+        use super::fuzzy_score;
+        assert!(fuzzy_score("rust note", "rn").is_some());
+        assert!(fuzzy_score("rust note", "xyz").is_none());
+        assert!(fuzzy_score("rust note", "nr").is_none(), "order matters");
+        // Word-start matches beat mid-word ones.
+        let direct = fuzzy_score("note list", "nl").unwrap();
+        let scattered = fuzzy_score("panel", "nl").unwrap();
+        assert!(direct > scattered, "{direct} vs {scattered}");
+        let run = fuzzy_score("notebook", "note").unwrap();
+        let sparse = fuzzy_score("xenotype", "note").unwrap();
+        assert!(run > sparse, "{run} vs {sparse}");
+    }
+
+    #[test]
     fn test_link_completion() {
         assert_eq!(open_link_query("hello [[Rus"), Some("Rus".to_string()));
         assert_eq!(open_link_query("hello [[a]] done"), None);
@@ -2086,6 +2308,8 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_graph_enlarge))
             .on_action(cx.listener(Self::on_graph_search_focus))
             .on_action(cx.listener(Self::on_delete_note))
+            .on_action(cx.listener(Self::on_quick_switcher))
+            .on_action(cx.listener(Self::on_key_help))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

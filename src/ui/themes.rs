@@ -48,7 +48,8 @@ impl LazyKasten {
                 })
                 .detach();
             }
-            self.theme_original = name;
+            self.theme_original = name.clone();
+            self.toast(format!("Theme: {name}"), cx);
         }
         self.screen = Screen::Editor;
         self.editor.update(cx, |s, cx| s.focus(window, cx));

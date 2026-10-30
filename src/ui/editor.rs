@@ -5,6 +5,26 @@ use super::*;
 impl LazyKasten {
     pub(super) fn on_editor_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         trace_next_frame(window, "keystroke_to_frame");
+        // Snippets: "#daily " / "#todo " expand on the trailing space.
+        {
+            let val = self.editor.read(cx).value().to_string();
+            let expanded = if val.ends_with("#daily ") {
+                Some(format!("{}- Daily log\n\n## Plan\n\n## Notes\n\n", chrono::Local::now().format("%Y-%m-%d")))
+            } else if val.ends_with("#todo ") {
+                Some("- [ ] ".to_string())
+            } else {
+                None
+            };
+            if let Some(new_text) = expanded {
+                let base = if new_text.starts_with("- [ ]") {
+                    format!("{}{}", &val[..val.len() - "#todo ".len()], new_text)
+                } else {
+                    new_text
+                };
+                self.editor.update(cx, |s, cx| s.set_value(&base, window, cx));
+                return;
+            }
+        }
         // Autosave: 1.5s after the last keystroke, through the normal
         // save path (which skips unchanged text). Debounced by gen.
         self.autosave_gen += 1;
@@ -314,11 +334,18 @@ impl LazyKasten {
         let mut chip_row = div().flex().items_center().gap_2();
         for (i, tag) in chips.iter().enumerate() {
             let tag_for_click = tag.clone();
+            let color = style::tag_color(tag, theme.background);
             chip_row = chip_row.child(
                 div()
                     .id(i)
                     .cursor_pointer()
-                    .text_color(theme.blue)
+                    .rounded(px(style::tokens::RADIUS_CHIP))
+                    .border_1()
+                    .border_color(color)
+                    .px(px(style::tokens::CHIP_PAD_X))
+                    .py(px(style::tokens::CHIP_PAD_Y))
+                    .text_size(px(style::tokens::FONT_MUTED))
+                    .text_color(color)
                     .hover(|s| s.bg(theme.list_hover))
                     .child(format!("#{tag}"))
                     .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -372,7 +399,7 @@ impl LazyKasten {
         }
 
         // `[[` matches shown above the footer; click inserts [[id|title]].
-        let mut link_bar = div().flex().flex_col().px_6();
+        let mut link_bar = div().flex().flex_wrap().gap_2().px_6().py_2();
         for (j, note) in self.link_matches.clone().iter().enumerate() {
             let id_for_click = note.id.clone();
             let title_for_click = note.title.clone();
@@ -380,9 +407,15 @@ impl LazyKasten {
                 div()
                     .id(200 + j)
                     .cursor_pointer()
+                    .rounded(px(style::tokens::RADIUS_CHIP))
+                    .border_1()
+                    .border_color(theme.blue)
+                    .px(px(style::tokens::CHIP_PAD_X))
+                    .py(px(style::tokens::CHIP_PAD_Y))
+                    .text_size(px(style::tokens::FONT_MUTED))
                     .text_color(theme.blue)
                     .hover(|s| s.bg(theme.list_hover))
-                    .child(note.title.clone())
+                    .child(format!("\u{27E6}{}\u{27E7}", note.title))
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         let text = this.editor.read(cx).value().to_string();
                         let new_text = complete_link(&text, &id_for_click, &title_for_click);
@@ -442,10 +475,30 @@ impl LazyKasten {
             div().into_any_element()
         };
 
+        // Unified footer meta: word count + saved dot.
+        let (word_count, is_saved) = {
+            let cur = self.editor.read(cx).value();
+            (cur.split_whitespace().count(), cur.as_ref() == self.saved_text.as_ref())
+        };
+        let editor_empty = word_count == 0 && self.note_id.is_none();
+        let meta: AnyElement = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .text_size(px(style::tokens::FONT_MUTED))
+            .text_color(theme.muted_foreground)
+            .child(format!("{word_count} words"))
+            .child(if is_saved {
+                div().text_color(theme.blue).child("\u{25CF} saved")
+            } else {
+                div().child("\u{25CB} unsaved")
+            })
+            .into_any_element();
+
         let right: AnyElement = if status.is_empty() {
             div()
                 .text_color(theme.muted_foreground)
-                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags   Ctrl+Shift+P themes   Ctrl+N new")
+                .child("Alt+J save & hide   Ctrl+O browse   Ctrl+T suggest tags   Ctrl+Shift+P commands   Ctrl+N new")
                 .into_any_element()
         } else {
             div()
@@ -463,13 +516,28 @@ impl LazyKasten {
             .child(
                 div()
                     .flex_1()
-                    .px_6()
-                    .pt_4()
+                    .flex()
+                    .justify_center()
                     .child(
                         div()
-                            .relative()
-                            .h_full()
-                            .child(Textarea::new(&self.editor).appearance(false).large().h_full())
+                            .w_full()
+                            .max_w(px(style::tokens::EDITOR_MAX_W))
+                            .px_6()
+                            .pt_4()
+                            .flex()
+                            .flex_col()
+                            .children(editor_empty.then(|| {
+                                div()
+                                    .pb_3()
+                                    .text_color(theme.muted_foreground)
+                                    .text_size(px(style::tokens::FONT_MUTED))
+                                    .child("Start typing \u{2014} end with #tags or a Tag: line.\nCtrl+P jump to a note \u{00B7} Ctrl+Shift+P commands \u{00B7} Ctrl+/ keys\nType [[ to link a note, #daily for today's log.")
+                            }))
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .child(Textarea::new(&self.editor).appearance(false).large().h_full())
                             .children(vim_block.map(|b| {
                                 div()
                                     .absolute()
@@ -479,21 +547,23 @@ impl LazyKasten {
                                     .h(b.size.height)
                                     .bg(hsla(theme.blue.h, theme.blue.s, theme.blue.l, 0.45))
                             })),
+                        ),
                     ),
             )
             .child(link_bar)
             .child(
                 div()
-                    .h_8()
+                    .h(px(style::tokens::FOOTER_H))
                     .flex()
                     .items_center()
                     .justify_between()
                     .border_t_1()
                     .border_color(theme.border)
                     .px_4()
-                    .child(chip_row)
+                    .child(if self.focus_mode { div().into_any_element() } else { chip_row.into_any_element() })
                     .child(vim_badge)
-                    .child(right),
+                    .child(meta)
+                    .child(if self.focus_mode { div().into_any_element() } else { right }),
             )
     }
     /// File-watcher entry: re-index changed paths in the background,
@@ -553,6 +623,7 @@ impl LazyKasten {
             self.vim.force_mode(mode);
         }
         self.vim_sync_readonly(cx);
+        self.toast(if enabled { "Vim mode on" } else { "Vim mode off" }, cx);
         self.status = if enabled { "Vim mode on".into() } else { "Vim mode off".into() };
         self.keep_status = true;
         cx.notify();

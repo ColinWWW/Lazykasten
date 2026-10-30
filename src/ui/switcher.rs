@@ -38,6 +38,142 @@ impl LazyKasten {
             .collect();
         cx.notify();
     }
+    // -- command palette + toasts + preview (prompt 6) ---------------------
+
+    pub(super) fn palette_commands() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("New note", "Ctrl+N", "new"),
+            ("Browse tags", "Ctrl+B", "browse"),
+            ("Quick switcher", "Ctrl+P", "switcher"),
+            ("Open graph", "Ctrl+G", "graph"),
+            ("Themes\u{2026}", "Ctrl+K T", "themes"),
+            ("Toggle Vim mode", "", "vim"),
+            ("Suggest tags (auto-tag)", "Ctrl+T", "suggest"),
+            ("Sweep #inbox", "Ctrl+Shift+I", "sweep"),
+            ("Trash", "", "trash"),
+            ("Keyboard shortcuts", "Ctrl+/", "help"),
+            ("Related notes", "Ctrl+R", "related"),
+            ("Toggle focus mode", "Ctrl+.", "focus"),
+        ]
+    }
+
+    pub(super) fn on_open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Editor {
+            self.save(window, cx);
+        }
+        self.screen = Screen::Palette;
+        self.list_insert = true;
+        self.selected = 0;
+        self.palette_results = (0..Self::palette_commands().len()).collect();
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(super) fn filter_palette(&mut self, query: &str) {
+        let q = query.to_lowercase();
+        let cmds = Self::palette_commands();
+        let mut scored: Vec<(i64, usize)> = cmds
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (name, _, _))| fuzzy_score(&name.to_lowercase(), &q).map(|s| (s, i)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        self.palette_results = scored.into_iter().map(|(_, i)| i).collect();
+        if self.selected >= self.palette_results.len() {
+            self.selected = 0;
+        }
+    }
+
+    pub(super) fn exec_palette(&mut self, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match cmd {
+            "new" => self.on_new_note(&NewNote, window, cx),
+            "browse" => {
+                self.screen = Screen::Editor;
+                self.on_browse(&Browse, window, cx);
+            }
+            "switcher" => self.on_quick_switcher(&QuickSwitcher, window, cx),
+            "graph" => self.on_open_graph(&OpenGraph, window, cx),
+            "themes" => self.open_themes(window, cx),
+            "vim" => {
+                self.set_vim_enabled(!self.vim_enabled, window, cx);
+                self.screen = Screen::Editor;
+                self.editor.update(cx, |s, cx| s.focus(window, cx));
+                cx.notify();
+            }
+            "suggest" => {
+                self.screen = Screen::Editor;
+                self.on_suggest_tags(&SuggestTags, window, cx);
+            }
+            "sweep" => self.on_sweep_inbox(&SweepInbox, window, cx),
+            "trash" => self.show_trash(window, cx),
+            "help" => self.on_key_help(&KeyHelp, window, cx),
+            "related" => {
+                self.screen = Screen::Editor;
+                self.on_related_notes(&RelatedNotes, window, cx);
+            }
+            "focus" => self.on_focus_mode(&FocusMode, window, cx),
+            _ => {}
+        }
+    }
+
+    pub(super) fn on_focus_mode(&mut self, _: &FocusMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_mode = !self.focus_mode;
+        if self.screen != Screen::Editor {
+            self.screen = Screen::Editor;
+            self.editor.update(cx, |s, cx| s.focus(window, cx));
+        }
+        self.toast(if self.focus_mode { "Focus mode on" } else { "Focus mode off" }, cx);
+        cx.notify();
+    }
+
+    pub(super) fn toast(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_gen += 1;
+        let seq = self.toast_gen;
+        self.toast = Some((msg.into(), seq));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(3000))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast_gen == seq {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Load the selected note's body for the two-pane preview (background
+    /// read; stale results dropped by id check at render).
+    pub(super) fn load_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(note) = self.notes.get(self.selected) else {
+            return;
+        };
+        let id = note.id.clone();
+        if self.preview_note.as_ref().is_some_and(|(pid, ..)| *pid == id) {
+            return;
+        }
+        let title = note.title.clone();
+        let store = self.store.clone();
+        let read_id = id.clone();
+        let task = cx.background_spawn(async move { store.read(&read_id) });
+        cx.spawn(async move |this, cx| {
+            let text = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(text) = text {
+                    let body: String = text.chars().take(900).collect();
+                    let tags = parse_tags(&text);
+                    this.preview_note = Some((id.clone(), title.clone(), body, tags));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn on_key_help(&mut self, _: &KeyHelp, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = Screen::Help;
         self.selected = 0;

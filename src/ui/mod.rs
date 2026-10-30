@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp, RenameTag, UndoAutoTag, RelatedNotes, VimEscape]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenPalette, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus, DeleteNote, QuickSwitcher, KeyHelp, RenameTag, UndoAutoTag, RelatedNotes, VimEscape, FocusMode]);
 
 /// Fuzzy title match: query chars must appear in order. The score
 /// favours word starts and consecutive runs. `None` = no match.
@@ -57,7 +57,8 @@ pub const KEY_HELP: &[(&str, &str, &str)] = &[
     ("Editor", "Ctrl+P", "Quick switcher: open a note by title"),
     ("Editor", "Ctrl+T", "Suggest tags for this note"),
     ("Editor", "Ctrl+G", "Open the graph around this note"),
-    ("Editor", "Ctrl+Shift+P", "Theme picker (also Ctrl+K then T)"),
+    ("Editor", "Ctrl+Shift+P", "Command palette (themes live there; Ctrl+K T jumps straight)"),
+    ("Editor", "Ctrl+.", "Focus mode (hide chips and hints)"),
     ("Editor", "Ctrl+Shift+Backspace", "Move this note to trash"),
     ("Editor", "Esc", "Dismiss suggestions / back from graph-opened note"),
     ("Browser", "Typing", "Search all notes"),
@@ -100,7 +101,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", Browse, Some("LazyKasten")),
         KeyBinding::new("ctrl-t", SuggestTags, Some("LazyKasten")),
         KeyBinding::new("ctrl-shift-t", SweepInbox, Some("LazyKasten")),
-        KeyBinding::new("ctrl-shift-p", OpenThemes, Some("LazyKasten")),
+        KeyBinding::new("ctrl-shift-p", OpenPalette, Some("LazyKasten")),
         KeyBinding::new("ctrl-g", OpenGraph, Some("LazyKasten")),
         KeyBinding::new("tab", GraphTab, Some("TagSearch")),
         KeyBinding::new("tab", GraphTab, Some("LazyKasten")),
@@ -119,6 +120,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
         KeyBinding::new("ctrl-shift-backspace", DeleteNote, Some("LazyKasten")),
         KeyBinding::new("ctrl-p", QuickSwitcher, Some("LazyKasten")),
+        KeyBinding::new("ctrl-.", FocusMode, Some("LazyKasten")),
         KeyBinding::new("f2", RenameTag, Some("TagSearch")),
         // Esc reaches the app as an action, not a raw key event, in
         // this GPUI stack, so Vim's Esc rides the same path.
@@ -161,6 +163,7 @@ enum Screen {
     Switcher,
     Help,
     Related,
+    Palette,
 }
 
 /// Schedule a `trace` entry for the next painted frame (no-op cost when
@@ -234,6 +237,11 @@ pub struct LazyKasten {
     trash_count: usize,
     switcher_index: Vec<(String, String, String)>,
     switcher_results: Vec<NoteSummary>,
+    palette_results: Vec<usize>,
+    focus_mode: bool,
+    toast: Option<(SharedString, u64)>,
+    toast_gen: u64,
+    preview_note: Option<(String, String, String, Vec<String>)>,
     renaming: Option<String>,
     autotag_undo: Vec<(String, Vec<String>)>,
     graph: Option<GraphView>,
@@ -336,6 +344,11 @@ impl LazyKasten {
             trash_count: 0,
             switcher_index: Vec::new(),
             switcher_results: Vec::new(),
+            palette_results: Vec::new(),
+            focus_mode: false,
+            toast: None,
+            toast_gen: 0,
+            preview_note: None,
             renaming: None,
             autotag_undo: Vec::new(),
             graph: None,
@@ -412,6 +425,11 @@ impl LazyKasten {
                 .collect();
             self.selected = 0;
             self.preview_theme(cx);
+            cx.notify();
+            return;
+        }
+        if self.screen == Screen::Palette {
+            self.filter_palette(query.trim());
             cx.notify();
             return;
         }
@@ -691,7 +709,7 @@ impl LazyKasten {
             }
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.show_tags(window, cx),
             Screen::Trash => self.show_tags(window, cx),
-            Screen::Switcher | Screen::Help => {
+            Screen::Switcher | Screen::Help | Screen::Palette => {
                 self.screen = Screen::Editor;
                 self.editor.update(cx, |s, cx| s.focus(window, cx));
                 cx.notify();
@@ -850,6 +868,8 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_suggest_tags))
             .on_action(cx.listener(Self::on_sweep_inbox))
             .on_action(cx.listener(Self::on_open_themes))
+            .on_action(cx.listener(Self::on_open_palette))
+            .on_action(cx.listener(Self::on_focus_mode))
             .on_action(cx.listener(Self::on_open_graph))
             .on_action(cx.listener(Self::on_graph_tab))
             .on_action(cx.listener(Self::on_graph_tags_key))
@@ -869,10 +889,28 @@ impl Render for LazyKasten {
             .bg(theme.background)
             .text_color(theme.foreground);
 
-        match self.screen {
+        let root = root.relative();
+        let root = match self.screen {
             Screen::Editor => root.child(self.render_editor(window, cx)),
             Screen::Graph => root.child(self.render_graph(window, cx)),
             _ => root.child(self.render_browser(window, cx)),
+        };
+        match &self.toast {
+            Some((msg, _)) => root.child(
+                div()
+                    .absolute()
+                    .bottom(px(48.0))
+                    .right(px(16.0))
+                    .px(px(style::tokens::SPACE_3))
+                    .py(px(style::tokens::SPACE_2))
+                    .rounded(px(style::tokens::RADIUS_CARD))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.list_active)
+                    .text_size(px(style::tokens::FONT_MUTED))
+                    .child(msg.clone()),
+            ),
+            None => root,
         }
     }
 }

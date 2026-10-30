@@ -156,6 +156,7 @@ impl LazyKasten {
             let _ = this.update(cx, |this, cx| {
                 if this.screen_gen == seq {
                     this.notes = notes;
+                    this.load_preview(cx);
                     cx.notify();
                 }
             });
@@ -192,6 +193,7 @@ impl LazyKasten {
             Screen::Related => self.notes.len(),
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => self.notes.len(),
             Screen::Themes => self.theme_filtered.len(),
+            Screen::Palette => self.palette_results.len(),
             Screen::Graph => 0,
             Screen::Editor => 0,
         }
@@ -207,6 +209,9 @@ impl LazyKasten {
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         if self.screen == Screen::Themes {
             self.preview_theme(cx);
+        }
+        if matches!(self.screen, Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) | Screen::Related) {
+            self.load_preview(cx);
         }
         cx.notify();
     }
@@ -261,6 +266,12 @@ impl LazyKasten {
                 }
             }
             Screen::Themes => self.keep_theme(window, cx),
+            Screen::Palette => {
+                if let Some(&ci) = self.palette_results.get(self.selected) {
+                    let cmd = Self::palette_commands()[ci].2;
+                    self.exec_palette(cmd, window, cx);
+                }
+            }
             Screen::Switcher => {
                 if let Some(note) = self.switcher_results.get(self.selected) {
                     let id = note.id.clone();
@@ -297,6 +308,7 @@ impl LazyKasten {
             Screen::Help => "Keys".to_string(),
             Screen::Related => format!("Related \u{00B7} {} notes", self.notes.len()),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
+            Screen::Palette => "Commands".to_string(),
             Screen::Graph => "Graph".to_string(),
             Screen::Editor => String::new(),
         }
@@ -308,6 +320,7 @@ impl LazyKasten {
             .id(ix)
             .h_8()
             .w_full()
+            .text_size(px(style::tokens::FONT_LIST))
             .flex()
             .items_center()
             .justify_between()
@@ -397,6 +410,11 @@ impl LazyKasten {
                     )
                     .child(swatches)
             }
+            Screen::Palette => {
+                let (name, keys, _) = Self::palette_commands()[self.palette_results[ix]];
+                row.child(div().flex_1().overflow_hidden().child(name))
+                    .child(div().text_color(theme.muted_foreground).child(keys))
+            }
             Screen::Switcher => {
                 let note = &self.switcher_results[ix];
                 row.child(div().flex_1().overflow_hidden().child(note.title.clone()))
@@ -433,10 +451,16 @@ impl LazyKasten {
         }))
         .into_any_element()
     }
-    pub(super) fn render_browser(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = row_colors(cx);
         let count = self.list_len();
         let heading = self.heading_text();
+        let wide = window.viewport_size().width > px(900.0);
+        let show_preview = wide
+            && matches!(self.screen, Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) | Screen::Related)
+            && self.preview_note.as_ref().is_some_and(|(pid, ..)| {
+                self.notes.get(self.selected).is_some_and(|n| &n.id == pid)
+            });
 
         div()
             .flex()
@@ -460,15 +484,47 @@ impl LazyKasten {
                     .child(heading),
             )
             .child(
-                uniform_list(
-                    "lazykasten-list",
-                    count,
-                    cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
-                        range.map(|ix| this.render_row(ix, cx)).collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&self.list_scroll)
-                .flex_1(),
+                div()
+                    .flex()
+                    .flex_1()
+                    .child(
+                        uniform_list(
+                            "lazykasten-list",
+                            count,
+                            cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                                range.map(|ix| this.render_row(ix, cx)).collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.list_scroll)
+                        .flex_1(),
+                    )
+                    .children(show_preview.then(|| {
+                        let (_, title, body, tags) = self.preview_note.clone().unwrap();
+                        div().child(
+                            div()
+                                .w(px(340.0))
+                                .border_l_1()
+                                .border_color(theme.border)
+                                .px(px(style::tokens::SPACE_4))
+                                .py(px(style::tokens::SPACE_3))
+                                .flex()
+                                .flex_col()
+                                .gap(px(style::tokens::SPACE_2))
+                                .child(div().text_size(px(16.0)).child(title))
+                                .child(
+                                    div()
+                                        .text_color(theme.blue)
+                                        .text_size(px(style::tokens::FONT_MUTED))
+                                        .child(tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .text_size(px(style::tokens::FONT_MUTED))
+                                        .child(body),
+                                ),
+                        )
+                    })),
             )
             .child(
                 div()
@@ -512,6 +568,9 @@ impl LazyKasten {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if let Ok(n) = &result {
+                    this.toast(format!("Renamed #{old} \u{2192} #{new} in {n} notes"), cx);
+                }
                 this.status = match &result {
                     Ok(n) => format!("Renamed #{old} \u{2192} #{new} in {n} notes"),
                     Err(e) => format!("Error: {e}"),

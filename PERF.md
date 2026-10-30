@@ -29,6 +29,21 @@ Everything measured got faster or stayed flat; nothing regressed:
 - Search is FTS-bound (~15ms at 500 hits) but now runs in the background
   with generation-tagged results, so it never drops typed characters; a
   1-char query is an exact-term lookup instead of the prefix worst case.
+- **Graph layout step at 20k notes / 26.7k edges: 25.7ms -> ~8ms**
+  (parallel Barnes-Hut repulsion across cores with fine chunks,
+  sum-based centres of mass, asleep-node skipping), and **settling the
+  global graph from scratch takes ~2.6s** (coarse tag-cluster start
+  plus an annealing heat ramp; target was 5s). The step hovers at the
+  8ms target (7.8-8.2ms across runs).
+- **Hotkey first frame: 27.7ms -> ~11.3ms**, the same as later shows
+  (10.6-18ms measured the same way in the same runs). Later shows were
+  already fast; the first paid one-time GPU swapchain creation, which
+  now happens at startup via a `SW_SHOWNOACTIVATE` warm show that is
+  hidden again after 250ms (an Alt+J in that window adopts it). Font
+  shaping for the editor screen is also warmed while hidden.
+  `activate_window()` is never used.
+- **Quick switcher: ~0.32ms per keystroke over 20k titles**
+  (allocation-free fuzzy scan; target 3ms).
 - Hotkey shows stayed ~10-21ms with themes enabled; a theme switch costs
   ~0.04-0.10ms of apply time (one frame). The cross-monitor first-show
   GPUI panic found while measuring was fixed by moving placement and

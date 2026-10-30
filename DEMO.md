@@ -36,8 +36,16 @@ exits quietly (single instance).
    target note: its footer shows "1 backlinks" — click it to list the
    linking notes.
 8. **Graph (10s).** Press **Ctrl+G**: the vault as a force-directed
-   graph, notes coloured by tag. Drag a node, scroll to zoom, double-click
-   a note to open it. Tab flips between Local and Global.
+   graph, notes coloured by tag. Drag a node, scroll to zoom, single-click
+   a note to open it (Esc returns to the graph). Tab flips Local/Global.
+8b. **Quick switcher (5s).** Press **Ctrl+P** and type a few letters of
+   any title ("spice") — fuzzy matching jumps straight to the note,
+   ~0.3ms per keystroke even at 20,000 notes. Recent notes come first
+   when the query is empty.
+8c. **Rename a tag everywhere (10s).** On the tag list, select a tag and
+   press **F2**, type the new name, Enter: every note is rewritten and
+   the status reports how many changed. Renaming into an existing tag
+   merges them.
 9. **Theme flip (10s).** Press **Ctrl+Shift+P** and arrow through five
    themes, each previews live in one frame. Press Enter to keep one
    (it survives restarts), or Esc to revert.
@@ -53,7 +61,7 @@ exits quietly (single instance).
      (400 notes) 1.36ms -> 0.53ms, auto-tag 8.8 -> 6.7 ms/note, search
      ~15 ms but now in the background. Theme switch ~0.1ms. Full table
      in PERF.md. Graph at 20k notes: data load
-     57 ms, one layout step 26 ms (cached once settled).
+     ~55 ms, one layout step ~8 ms, full settle from scratch ~2.6 s.
 
 ## Fallbacks
 

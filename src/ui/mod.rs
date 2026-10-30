@@ -17,31 +17,33 @@ pub fn fuzzy_score(title_lower: &str, query_lower: &str) -> Option<i64> {
     if query_lower.is_empty() {
         return Some(0);
     }
-    let title: Vec<char> = title_lower.chars().collect();
+    // Allocation-free scan: one pass over the title's chars, so a
+    // keystroke over 20k titles stays within its 3ms budget.
     let mut score: i64 = 0;
-    let mut ti = 0usize;
+    let mut chars = title_lower.chars().enumerate();
     let mut prev_idx: Option<usize> = None;
+    let mut prev_char: Option<char> = None;
     for qc in query_lower.chars() {
-        let mut found = None;
-        while ti < title.len() {
-            if title[ti] == qc {
-                found = Some(ti);
+        let mut hit = None;
+        for (idx, c) in chars.by_ref() {
+            if c == qc {
+                hit = Some(idx);
                 break;
             }
-            ti += 1;
+            prev_char = Some(c);
         }
-        let idx = found?;
+        let idx = hit?;
         score += 1;
-        if prev_idx == Some(idx.wrapping_sub(1)) && idx > 0 {
+        if prev_idx.map(|p| p + 1) == Some(idx) {
             score += 5;
         }
-        if idx == 0 || !title[idx - 1].is_alphanumeric() {
+        if idx == 0 || prev_char.map(|c| !c.is_alphanumeric()).unwrap_or(false) {
             score += 8;
         }
         prev_idx = Some(idx);
-        ti = idx + 1;
+        prev_char = Some(qc);
     }
-    Some(score - title.len() as i64 / 16)
+    Some(score - title_lower.len() as i64 / 16)
 }
 
 /// One key table for the help overlay (and the bindings in

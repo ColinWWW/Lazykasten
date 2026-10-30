@@ -12,6 +12,12 @@ note is saved, tagged, and indexed.
 | Ctrl+S | Save the current note |
 | Ctrl+N | Save and start a new note |
 | Ctrl+O | Browse tags and notes (again to return to the editor) |
+| Ctrl+P | Quick switcher: open any note by fuzzy title match |
+| Ctrl+R | Related notes for the open note |
+| Ctrl+Z | Undo the last auto-tagging (right after it happens) |
+| Ctrl+Shift+Backspace | Move the open note to the trash |
+| Ctrl+/ or F1 | Key help (the same table the app shows) |
+| F2 | Rename the selected tag (on the tag list; merges if the name exists) |
 | Ctrl+T | Suggest tags for the open note (click a chip to apply) |
 | Ctrl+G | Open the graph (Local around the open note, else Global) |
 | Ctrl+Shift+T | Sweep the inbox with the auto-tagger (on the tag list) |
@@ -63,15 +69,17 @@ layout on a background thread.
   tag nodes, **O** toggles orphan notes, **1/2/3** set the local depth,
   **Ctrl+Enter** enlarges/restores the window.
 - Drag nodes (the layout reheats), drag the background to pan, scroll to
-  zoom, hover highlights a node, a click centers it, a double-click opens
-  it. The search box dims non-matching notes.
+  zoom, hover highlights a node, and a **single click opens the note**
+  (under 4px of movement is a click, more is a drag). Esc from the
+  opened note returns to the graph. **/** or Ctrl+F focuses the search
+  box, which dims non-matching notes; Esc returns to the canvas.
 - Global positions persist in `<vault>/.lazykasten/graph_layout.bin`, so
   reopening the global graph does not restart the simulation.
 
 ## Themes
 
 25 bundled themes (Catppuccin, Gruvbox, Tokyo Night, Nord, Dracula,
-Solarized, RosÃ© Pine, Kanagawa, Everforest, Ayu, GitHub, Monokai, One Dark,
+Solarized, Rosé Pine, Kanagawa, Everforest, Ayu, GitHub, Monokai, One Dark,
 and the default Lazykasten Dark), all fully local.
 
 - **Ctrl+Shift+P** (or Ctrl+K then T) opens the theme picker. Arrow keys
@@ -87,7 +95,47 @@ and the default Lazykasten Dark), all fully local.
 
 Performance at 20,000 notes (release, see `PERF.md`): first index 0.85s,
 no-change re-check 0.025s, tag index (400 notes) 0.5ms, auto-tag 6.7ms,
-hotkey show ~10-21ms.
+hotkey first frame ~11ms (swapchain warmed at startup), graph layout step ~8ms at 20k and full settle ~2.6s, quick-switcher fuzzy ~0.3ms per keystroke at 20k titles.
+
+## Data safety
+
+Notes are hard to lose:
+
+- **Atomic saves.** Every write (notes, settings, the graph layout
+  cache) goes to a `.tmp` file in the same folder and is renamed over
+  the target, so a crash mid-write can never truncate a note. Stale
+  `.tmp` files are cleaned up on sync.
+- **Autosave.** 1.5s after you stop typing, the open note saves in the
+  background through the normal save path.
+- **Outside edits win.** If a note's file changed on disk (say, in
+  Obsidian) since you opened it, saving writes your text to
+  `<id>-conflict-<timestamp>.md` instead of overwriting — and the app
+  watches `notes/` live: an outside change reloads an untouched open
+  note, or flags the conflict when you have unsaved edits.
+- **Trash, never delete.** Saving an empty note or pressing
+  Ctrl+Shift+Backspace moves it to `<vault>/.lazykasten/trash/`. The
+  `#trash` row at the bottom of the tag list restores notes with Enter.
+
+## Settings and startup
+
+`<vault>/.lazykasten/settings.toml` (hand-parsed `key = "value"` lines):
+
+| Key | Meaning |
+|---|---|
+| `theme` | Saved theme name (written by the theme picker) |
+| `hotkey` | Global show/hide hotkey, e.g. `alt+j` (falls back to Alt+J with a status note) |
+| `vault` | Vault path override, read from the default vault's settings |
+| `window` | Remembered window `x,y,w,h` (written when the window hides) |
+
+The tray menu has a **Start with Windows** checkbox
+(`HKCU\...\Run\Lazykasten` = `"<exe>" --hidden`). The exe carries an
+embedded icon (purple tile, white L) for Explorer, Alt+Tab and the
+taskbar.
+
+Organizing: **F2** on the tag list renames a tag across every note
+(`Tag:` lines and `#hashtags`, written atomically; an existing name
+merges), **Ctrl+Z** right after an auto-tag removes it again, and
+**Ctrl+R** lists the notes most similar to the open one.
 
 ## Vault
 

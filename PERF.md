@@ -1,5 +1,22 @@
 # Lazykasten performance
 
+## Known limits
+
+- **Editor styling (prompt 5, milestone 24).** Blue `Tag:` values,
+  `#hashtag`/`[[link]]` styling, spellcheck squiggles and light Markdown
+  are not implemented. In gpui-component 0.8.1 the only styled-range
+  machinery is the tree-sitter highlighter plus LSP diagnostics
+  (`set_highlighter`, `DiagnosticEntry`, wavy diagnostic styles), and it
+  is consumed exclusively by the code-`Editor` element
+  (`src/input/editor.rs`); the plain `Textarea` element the note editor
+  uses paints no highlight or diagnostic ranges at all. The theme's
+  `HighlightTheme` is likewise only read by that highlighter. Switching
+  the note editor to the code-editor element would change its behaviour
+  (line numbers, code undo/selection semantics, no soft-wrap capture
+  flow) and put a tree-sitter parse on the typing path, so per the
+  milestone's own rule this is documented instead of hacked around.
+  Revisit if gpui-component exposes styled ranges for `Textarea`.
+
 ## Summary (final)
 
 Everything measured got faster or stayed flat; nothing regressed:

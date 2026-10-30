@@ -308,7 +308,13 @@ impl LazyKasten {
             Screen::Help => "Keys".to_string(),
             Screen::Related => format!("Related \u{00B7} {} notes", self.notes.len()),
             Screen::Themes => format!("{} themes", self.theme_filtered.len()),
-            Screen::Palette => "Commands".to_string(),
+            Screen::Palette => {
+                if self.palette_results.is_empty() {
+                    "Commands \u{00B7} no matches".to_string()
+                } else {
+                    "Commands".to_string()
+                }
+            }
             Screen::Graph => "Graph".to_string(),
             Screen::Editor => String::new(),
         }
@@ -455,7 +461,7 @@ impl LazyKasten {
         let theme = row_colors(cx);
         let count = self.list_len();
         let heading = self.heading_text();
-        let wide = window.viewport_size().width > px(900.0);
+        let wide = window.viewport_size().width > px(780.0);
         let show_preview = wide
             && matches!(self.screen, Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) | Screen::Related)
             && self.preview_note.as_ref().is_some_and(|(pid, ..)| {

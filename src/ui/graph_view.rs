@@ -67,6 +67,9 @@ impl LazyKasten {
         }
         self.g_center = self.note_id.clone();
         self.g_local = self.g_center.is_some();
+        // The search box is shared with the browser/palette: the graph
+        // starts with an empty query, not the last screen's text.
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.load_graph(window, cx);
     }
     pub(super) fn load_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {

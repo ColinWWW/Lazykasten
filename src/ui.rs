@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::autotag::Suggestion;
 use crate::store::{NoteSummary, Store, TagCount, parse_tags};
 
-actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge]);
+actions!(lazykasten, [SaveNote, NewNote, Browse, Back, SelectPrev, SelectNext, SuggestTags, SweepInbox, OpenThemes, OpenGraph, GraphTab, GraphTagsKey, GraphOrphansKey, GraphDepth1, GraphDepth2, GraphDepth3, GraphEnlarge, GraphSearchFocus]);
 
 /// Register keys. Must run after `gpui_kit::init` so the more specific
 /// `"TagSearch > Input"` context wins over the input's own `"Input"` bindings.
@@ -24,12 +24,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-g", OpenGraph, Some("LazyKasten")),
         KeyBinding::new("tab", GraphTab, Some("TagSearch")),
         KeyBinding::new("tab", GraphTab, Some("LazyKasten")),
-        KeyBinding::new("t", GraphTagsKey, Some("TagSearch")),
-        KeyBinding::new("o", GraphOrphansKey, Some("TagSearch")),
-        KeyBinding::new("1", GraphDepth1, Some("TagSearch")),
-        KeyBinding::new("2", GraphDepth2, Some("TagSearch")),
-        KeyBinding::new("3", GraphDepth3, Some("TagSearch")),
+        KeyBinding::new("tab", GraphTab, Some("GraphView")),
+        // Single-letter graph keys live only in the canvas context, so
+        // they can never swallow typing in any search box.
+        KeyBinding::new("t", GraphTagsKey, Some("GraphView")),
+        KeyBinding::new("o", GraphOrphansKey, Some("GraphView")),
+        KeyBinding::new("1", GraphDepth1, Some("GraphView")),
+        KeyBinding::new("2", GraphDepth2, Some("GraphView")),
+        KeyBinding::new("3", GraphDepth3, Some("GraphView")),
+        KeyBinding::new("/", GraphSearchFocus, Some("GraphView")),
+        KeyBinding::new("ctrl-f", GraphSearchFocus, Some("GraphView")),
         KeyBinding::new("ctrl-enter", GraphEnlarge, Some("TagSearch")),
+        KeyBinding::new("ctrl-enter", GraphEnlarge, Some("GraphView")),
         KeyBinding::new("ctrl-k t", OpenThemes, Some("LazyKasten")),
         KeyBinding::new("escape", Back, Some("LazyKasten")),
         KeyBinding::new("up", SelectPrev, Some("TagSearch > Input")),
@@ -137,6 +143,7 @@ struct GraphView {
     snap: usize,
     drag_node: Option<usize>,
     drag_moved: bool,
+    down_pos: [f32; 2],
     pan: Option<([f32; 2], [f32; 2])>,
     enlarged: bool,
     prev_size: Option<(f32, f32)>,
@@ -168,6 +175,8 @@ pub struct LazyKasten {
     themes_loaded: bool,
     screen_gen: u64,
     graph: Option<GraphView>,
+    graph_focus: FocusHandle,
+    return_to_graph: bool,
     graph_loading: bool,
     graph_seq: u64,
     g_local: bool,
@@ -227,6 +236,8 @@ impl LazyKasten {
             themes_loaded: false,
             screen_gen: 0,
             graph: None,
+            graph_focus: cx.focus_handle(),
+            return_to_graph: false,
             graph_loading: false,
             graph_seq: 0,
             g_local: false,
@@ -518,6 +529,12 @@ impl LazyKasten {
         }
     }
 
+    fn on_graph_search_focus(&mut self, _: &GraphSearchFocus, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Graph {
+            self.search.update(cx, |s, cx| s.focus(window, cx));
+        }
+    }
+
     fn on_open_themes(&mut self, _: &OpenThemes, window: &mut Window, cx: &mut Context<Self>) {
         if self.screen != Screen::Themes {
             self.open_themes(window, cx);
@@ -701,7 +718,7 @@ impl LazyKasten {
         self.graph = None;
         self.graph_loading = true;
         self.screen = Screen::Graph;
-        self.search.update(cx, |s, cx| s.focus(window, cx));
+        self.graph_focus.focus(window, cx);
         cx.notify();
         let store = self.store.clone();
         let mode = if self.g_local { crate::graph::GraphMode::Local } else { crate::graph::GraphMode::Global };
@@ -746,6 +763,7 @@ impl LazyKasten {
                         snap: 0,
                         drag_node: None,
                         drag_moved: false,
+                        down_pos: [0.0, 0.0],
                         pan: None,
                         enlarged: false,
                         prev_size: None,
@@ -867,27 +885,18 @@ impl LazyKasten {
         [f32::from(ev_pos.x) - vp.bounds_origin[0], f32::from(ev_pos.y) - vp.bounds_origin[1]]
     }
 
-    fn graph_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn graph_mouse_down(&mut self, ev: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if ev.button != MouseButton::Left || self.graph.is_none() {
             return;
         }
         let local = self.graph_local(ev.position);
         let hit = self.graph_hit(local);
-        if ev.click_count >= 2 {
-            if let Some(i) = hit {
-                let node = self.graph.as_ref().unwrap().data.nodes[i].clone();
-                if !node.is_tag {
-                    self.stop_graph();
-                    self.open_note(&node.id, window, cx);
-                    return;
-                }
-            }
-        }
         match hit {
             Some(i) => {
                 if let Some(g) = &mut self.graph {
                     g.drag_node = Some(i);
                     g.drag_moved = false;
+                    g.down_pos = local;
                     g.pinned.lock().unwrap().insert(i);
                 }
                 self.start_sim(cx);
@@ -924,7 +933,11 @@ impl LazyKasten {
         match act {
             Act::Drag(i, world) => {
                 if let Some(g) = &mut self.graph {
-                    g.drag_moved = true;
+                    let dx = local[0] - g.down_pos[0];
+                    let dy = local[1] - g.down_pos[1];
+                    if dx * dx + dy * dy >= 16.0 {
+                        g.drag_moved = true;
+                    }
                     let mut guard = g.pos.lock().unwrap();
                     std::sync::Arc::make_mut(&mut *guard)[i] = world;
                     g.snap += 1;
@@ -950,16 +963,28 @@ impl LazyKasten {
         }
     }
 
-    fn graph_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn graph_mouse_up(&mut self, _ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mut center_on: Option<usize> = None;
+        let mut open_id: Option<String> = None;
         if let Some(g) = &mut self.graph {
             if let Some(i) = g.drag_node.take() {
                 g.pinned.lock().unwrap().remove(&i);
                 if !g.drag_moved {
-                    center_on = Some(i);
+                    let node = &g.data.nodes[i];
+                    if node.is_tag {
+                        center_on = Some(i);
+                    } else {
+                        open_id = Some(node.id.clone());
+                    }
                 }
             }
             g.pan = None;
+        }
+        if let Some(id) = open_id {
+            self.stop_graph();
+            self.return_to_graph = true;
+            self.open_note(&id, window, cx);
+            return;
         }
         if let (Some(i), Some(g)) = (center_on, &self.graph) {
             let pos = g.pos.lock().unwrap();
@@ -1148,6 +1173,7 @@ impl LazyKasten {
             Screen::TagIndex(_) | Screen::Search | Screen::Backlinks(_) => {
                 if let Some(note) = self.notes.get(self.selected) {
                     let id = note.id.clone();
+                    self.return_to_graph = false;
                     self.open_note(&id, window, cx);
                 }
             }
@@ -1203,7 +1229,21 @@ impl LazyKasten {
             cx.notify();
             return;
         }
+        if self.screen == Screen::Editor && self.return_to_graph {
+            self.return_to_graph = false;
+            self.screen = Screen::Graph;
+            self.start_sim(cx);
+            self.graph_focus.focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.screen == Screen::Graph {
+            // Esc in the graph search box returns focus to the canvas.
+            if self.search.read(cx).focus_handle(cx).is_focused(window) {
+                self.graph_focus.focus(window, cx);
+                cx.notify();
+                return;
+            }
             self.leave_graph(window, cx);
             return;
         }
@@ -1698,6 +1738,8 @@ impl LazyKasten {
             .child(
                 div()
                     .flex_1()
+                    .track_focus(&self.graph_focus)
+                    .key_context("GraphView")
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::graph_mouse_down))
                     .on_mouse_move(cx.listener(Self::graph_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::graph_mouse_up))
@@ -1713,7 +1755,7 @@ impl LazyKasten {
                     .border_color(colors.border)
                     .px_4()
                     .text_color(colors.muted_foreground)
-                    .child("Tab Local/Global   T tag nodes   O orphans   1/2/3 depth   Ctrl+Enter enlarge   drag nodes   wheel zoom   double-click opens   Esc back"),
+                    .child("Tab Local/Global   T tag nodes   O orphans   1/2/3 depth   / search   Ctrl+Enter enlarge   drag nodes   wheel zoom   click opens   Esc back"),
             )
     }
 
@@ -1883,6 +1925,7 @@ impl Render for LazyKasten {
             .on_action(cx.listener(Self::on_graph_depth2))
             .on_action(cx.listener(Self::on_graph_depth3))
             .on_action(cx.listener(Self::on_graph_enlarge))
+            .on_action(cx.listener(Self::on_graph_search_focus))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);

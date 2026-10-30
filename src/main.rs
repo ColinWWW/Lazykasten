@@ -457,6 +457,18 @@ fn main() {
                 return;
             }
         };
+        // DWM rounded corners (Windows 11); harmless elsewhere.
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+            let pref: i32 = 2; // DWMWCP_ROUND
+            let _ = DwmSetWindowAttribute(
+                hwnd_cell.get(),
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &pref as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
         if let Some(msg) = hotkey_status.take() {
             let _ = view.update(cx, |v, cx| v.set_initial_status(msg, cx));
         }

@@ -84,6 +84,43 @@ pub fn parse_settings(text: &str) -> Option<String> {
     settings_map(text).get("theme").cloned()
 }
 
+/// Windows "Apps use light theme" preference (Personalize key).
+/// `None` when the value cannot be read.
+#[cfg(windows)]
+pub fn os_prefers_light() -> Option<bool> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegCloseKey, RegOpenKeyExW, RegQueryValueExW, KEY_READ};
+    use windows::core::PCWSTR;
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    unsafe {
+        let mut key = windows::Win32::System::Registry::HKEY::default();
+        let sub = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), Some(0), KEY_READ, &mut key).is_err() {
+            return None;
+        }
+        let name = wide("AppsUseLightTheme");
+        let mut data: u32 = 0;
+        let mut len = std::mem::size_of::<u32>() as u32;
+        let ok = RegQueryValueExW(
+            key,
+            PCWSTR(name.as_ptr()),
+            None,
+            None,
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut len),
+        )
+        .is_ok();
+        let _ = RegCloseKey(key);
+        if ok { Some(data != 0) } else { None }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn os_prefers_light() -> Option<bool> {
+    None
+}
+
 pub fn saved_theme_name(data_dir: &Path) -> String {
     std::fs::read_to_string(data_dir.join("settings.toml"))
         .ok()
@@ -121,7 +158,15 @@ pub fn apply_registered(cx: &mut gpui_kit::App, name: &str) -> bool {
 /// the default). User themes are searched only if the saved name is not
 /// bundled, so a saved user theme still survives a restart.
 pub fn apply_saved(cx: &mut gpui_kit::App, data_dir: &Path) {
-    let saved = saved_theme_name(data_dir);
+    // No saved choice yet: follow the OS light/dark preference.
+    let has_saved = read_settings(data_dir).contains_key("theme");
+    let saved = if has_saved {
+        saved_theme_name(data_dir)
+    } else if os_prefers_light() == Some(true) {
+        "GitHub Light".to_string()
+    } else {
+        DEFAULT_THEME.to_string()
+    };
     if let Some(json) = embedded_json(&saved) {
         let _ = register_json(cx, json);
     } else if let Ok(entries) = std::fs::read_dir(data_dir.join("themes")) {

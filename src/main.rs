@@ -37,13 +37,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use store::Store;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Command {
     Toggle,
     Show,
     Quit,
     Warm,
     WarmHide,
+    FilesChanged(Vec<std::path::PathBuf>),
 }
 
 /// GPUI's own `window_handle()` returns an `AnyWindowHandle`; call the
@@ -357,8 +358,48 @@ fn main() {
         // panics on the already-borrowed App if called inside the update.
         let placed = Rc::new(Cell::new(start_hidden));
         let quit_store = store.clone();
+        // Live file watching: notify on notes/, debounced 300ms in a
+        // blocking thread (0% idle CPU), re-indexed in the background.
+        let _watcher = {
+            use notify::Watcher as _;
+            let (wtx, wrx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
+            let tx_files = tx.clone();
+            std::thread::spawn(move || {
+                while let Ok(first) = wrx.recv() {
+                    let mut paths = first;
+                    loop {
+                        match wrx.recv_timeout(std::time::Duration::from_millis(300)) {
+                            Ok(mut more) => paths.append(&mut more),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    paths.sort();
+                    paths.dedup();
+                    let _ = tx_files.try_send(Command::FilesChanged(paths));
+                }
+            });
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    let _ = wtx.send(ev.paths);
+                }
+            }) {
+                Ok(mut w) => {
+                    let _ = w.watch(&store.notes_dir(), notify::RecursiveMode::NonRecursive);
+                    Some(w)
+                }
+                Err(e) => {
+                    eprintln!("lazykasten: file watcher failed: {e}");
+                    None
+                }
+            }
+        };
+
         let tx_loop = tx.clone();
         cx.spawn(async move |cx| {
+            // Keep the watcher alive for the app's whole life: locals
+            // of the startup closure drop when it returns.
+            let _watcher_keep = _watcher;
             while let Ok(cmd) = rx.recv().await {
                 let view = view.clone();
                 let placed = placed.clone();
@@ -366,6 +407,11 @@ fn main() {
                 let hwnd = hwnd_cell.get();
                 let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
                 match cmd {
+                    Command::FilesChanged(paths) => {
+                        let _ = any_window.update(cx, |_, window, cx| {
+                            view.update(cx, |v, cx| v.on_external_files(paths, window, cx));
+                        });
+                    }
                     Command::Warm => {
                         place_on_cursor_monitor(hwnd);
                         unsafe {

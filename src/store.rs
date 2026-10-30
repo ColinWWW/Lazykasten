@@ -248,6 +248,51 @@ impl Store {
         self.conn.lock().expect("store lock poisoned")
     }
 
+    pub fn notes_dir(&self) -> PathBuf {
+        self.notes_dir.clone()
+    }
+
+    /// Re-index only the given changed paths (file watcher). Files the
+    /// app itself just wrote are skipped: their indexed mtime already
+    /// matches. Returns the note ids that actually changed.
+    pub fn sync_paths(&self, paths: &[PathBuf]) -> Result<Vec<String>> {
+        let mut changed = Vec::new();
+        for path in paths {
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let id = id.to_string();
+            if path.exists() {
+                let mtime = file_mtime_ms(path)?;
+                let known: Option<i64> = {
+                    let conn = self.conn.lock().expect("store lock poisoned");
+                    conn.query_row("SELECT mtime FROM notes WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                        .ok()
+                };
+                if known == Some(mtime) {
+                    continue;
+                }
+                let bytes = std::fs::read(path)?;
+                let (text, _) = decode_note_bytes(&bytes);
+                let mut conn = self.conn.lock().expect("store lock poisoned");
+                let tx = conn.transaction()?;
+                Self::index_note(&tx, &id, &text, mtime)?;
+                tx.commit()?;
+                changed.push(id);
+            } else {
+                let mut conn = self.conn.lock().expect("store lock poisoned");
+                let tx = conn.transaction()?;
+                Self::remove_note(&tx, &id)?;
+                tx.commit()?;
+                changed.push(id);
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn note_path(&self, id: &str) -> PathBuf {
         self.notes_dir.join(format!("{id}.md"))
     }
@@ -1117,6 +1162,28 @@ mod tests {
             t0.elapsed().as_secs_f64() * 1000.0 / 10.0
         );
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_sync_paths_external_edit() {
+        let root = temp_root();
+        let store = Store::open(&root).unwrap();
+        store.save("20260101000000", "Original\nTag: Rust").unwrap();
+        // The app's own save is not a change.
+        let own = store.sync_paths(&[store.note_path("20260101000000")]).unwrap();
+        assert!(own.is_empty(), "{own:?}");
+        // An outside edit is picked up; a delete removes the note.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(store.note_path("20260101000000"), "Edited elsewhere\nTag: Cooking").unwrap();
+        let changed = store.sync_paths(&[store.note_path("20260101000000")]).unwrap();
+        assert_eq!(changed, vec!["20260101000000".to_string()]);
+        assert_eq!(store.notes_with_tag("Cooking").unwrap().len(), 1);
+        std::fs::remove_file(store.note_path("20260101000000")).unwrap();
+        let changed = store.sync_paths(&[store.note_path("20260101000000")]).unwrap();
+        assert_eq!(changed, vec!["20260101000000".to_string()]);
+        assert_eq!(store.note_count().unwrap(), 0);
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

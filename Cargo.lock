@@ -3662,6 +3662,7 @@ dependencies = [
  "dirs 6.0.0",
  "global-hotkey",
  "gpui-kit",
+ "notify",
  "raw-window-handle",
  "rusqlite",
  "serde_json",

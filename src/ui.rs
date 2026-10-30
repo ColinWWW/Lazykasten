@@ -779,6 +779,39 @@ impl LazyKasten {
         cx.notify();
     }
 
+    /// File-watcher entry: re-index changed paths in the background,
+    /// then reload / flag the open note if it was among them.
+    pub fn on_external_files(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { store.sync_paths(&paths).unwrap_or_default() });
+        cx.spawn(async move |this, cx| {
+            let changed = task.await;
+            if changed.is_empty() {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.refresh_switcher_index(cx);
+                if let Some(open) = this.note_id.clone() {
+                    if changed.contains(&open) && this.screen == Screen::Editor {
+                        if this.editor.read(cx).value() == this.saved_text {
+                            this.open_note(&open, window, cx);
+                        } else {
+                            this.status = "Changed on disk \u{2014} your edits are kept; saving writes a conflict copy".into();
+                            this.keep_status = true;
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn refresh_switcher_index(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let task = cx.background_spawn(async move { store.notes_titles().unwrap_or_default() });
